@@ -30,6 +30,18 @@ function App() {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [sessionId] = useState(() => {
+  const existingSession = localStorage.getItem("paras_arts_agent_session");
+
+  if (existingSession) {
+    return existingSession;
+  }
+
+  const newSession = crypto.randomUUID();
+  localStorage.setItem("paras_arts_agent_session", newSession);
+
+  return newSession;
+});
 
   const sendMessage = async (text = message) => {
     const userMessage = text.trim();
@@ -55,8 +67,9 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          message: userMessage,
-        }),
+  message: userMessage,
+  session_id: sessionId,
+}),
       });
 
       const data = await response.json();
@@ -275,7 +288,7 @@ function App() {
 
           <div className="composer-footer">
             <span>
-              Paras Arts AI · Read-only access to business data
+              Paras Arts AI · Read & write access to business data
             </span>
 
             <span className="keyboard-hint">
