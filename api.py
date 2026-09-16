@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from google import genai
 
 from google.genai import types
+from fastapi.middleware.cors import CORSMiddleware
 
 from paras_tools import (
     search_paras_orders,
@@ -45,7 +46,15 @@ app = FastAPI(
     description="AI agent for analyzing Paras Arts MongoDB data.",
     version="1.0.0",
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class ChatRequest(BaseModel):
     message: str
