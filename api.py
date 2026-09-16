@@ -1,10 +1,14 @@
+
 import os
+
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException
+
 from pydantic import BaseModel
 
 from google import genai
+
 from google.genai import types
 
 from paras_tools import (
@@ -22,12 +26,14 @@ from paras_tools import (
     get_paras_business_summary,
 )
 
+
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing.")
+
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -225,6 +231,7 @@ You are the Paras Arts AI Data Agent.
 You help analyze data from the Paras Arts MongoDB database.
 
 You can:
+
 - Search orders
 - Analyze orders
 - Analyze payment statuses
@@ -241,17 +248,24 @@ You can:
 Important rules:
 
 1. Never access or expose the admins collection.
+
 2. Never expose sensitive customer information such as:
    - phone numbers
    - email addresses
    - physical addresses
    - reference image URLs
    - private image URLs
+
 3. Requested order budgets are NOT confirmed revenue.
+
 4. Do not invent database information.
+
 5. Use tools when database information is required.
+
 6. Explain results clearly and simply.
+
 7. This deployed version is READ-ONLY.
+
 8. Do not attempt database write operations.
 """
 
@@ -268,21 +282,55 @@ def execute_function(function_name, args):
     return function(**args)
 
 
-def run_agent(user_message):
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=user_message,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            tools=[tools],
-        ),
+def is_quota_error(error):
+    """
+    Detect Gemini quota/rate-limit errors.
+    """
+    error_text = str(error).upper()
+
+    return (
+        "429" in error_text
+        or "RESOURCE_EXHAUSTED" in error_text
+        or "QUOTA" in error_text
+        or "RATE LIMIT" in error_text
     )
 
+
+def run_agent(user_message):
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                tools=[tools],
+            ),
+        )
+
+    except Exception as e:
+        print(f"Gemini error: {e}")
+
+        if is_quota_error(e):
+            return (
+                "The AI service is temporarily unavailable because "
+                "the Gemini API quota has been reached. Please try again later."
+            )
+
+        return (
+            "The AI service is temporarily unavailable. "
+            "Please try again later."
+        )
+
+
     while response.function_calls:
+
         function_responses = []
 
         for function_call in response.function_calls:
+
             function_name = function_call.name
+
             function_args = dict(function_call.args or {})
 
             print(
@@ -290,10 +338,19 @@ def run_agent(user_message):
                 f"{function_args}"
             )
 
-            result = execute_function(
-                function_name,
-                function_args
-            )
+            try:
+                result = execute_function(
+                    function_name,
+                    function_args
+                )
+
+            except Exception as e:
+                print(f"Tool error: {e}")
+
+                return (
+                    "I couldn't retrieve the requested data right now. "
+                    "Please try again later."
+                )
 
             function_responses.append(
                 types.Part.from_function_response(
@@ -304,24 +361,42 @@ def run_agent(user_message):
                 )
             )
 
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                user_message,
-                response.candidates[0].content,
-                *function_responses,
-            ],
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                tools=[tools],
-            ),
-        )
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=[
+                    user_message,
+                    response.candidates[0].content,
+                    *function_responses,
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    tools=[tools],
+                ),
+            )
+
+        except Exception as e:
+            print(f"Gemini follow-up error: {e}")
+
+            if is_quota_error(e):
+                return (
+                    "The AI service is temporarily unavailable because "
+                    "the Gemini API quota has been reached. Please try again later."
+                )
+
+            return (
+                "The AI service is temporarily unavailable. "
+                "Please try again later."
+            )
+
 
     return response.text
 
 
 @app.get("/")
 def root():
+
     return {
         "status": "online",
         "service": "Paras Arts AI Data Agent",
@@ -333,6 +408,7 @@ def root():
 
 @app.get("/health")
 def health():
+
     return {
         "status": "healthy"
     }
@@ -340,7 +416,9 @@ def health():
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
+
     try:
+
         answer = run_agent(request.message)
 
         return ChatResponse(
@@ -348,9 +426,10 @@ def chat(request: ChatRequest):
         )
 
     except Exception as e:
+
         print(f"Agent error: {e}")
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail="The AI service is temporarily unavailable. Please try again later."
         )
