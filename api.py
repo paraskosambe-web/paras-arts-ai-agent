@@ -1100,14 +1100,19 @@ def chat(request: ChatRequest):
 
     except Exception as error:
 
-        print(
-            f"Agent error: {type(error).__name__}: {error}"
-        )
+        import traceback
+
+        print("=" * 60)
+        print("AGENT ERROR")
+        print(f"ERROR TYPE: {type(error).__name__}")
+        print(f"ERROR: {error}")
+        print("TRACEBACK:")
+        traceback.print_exc()
+        print("=" * 60)
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "The AI agent encountered an error. "
-                "Please try again."
+                f"Agent error: {type(error).__name__}: {str(error)}"
             ),
         )
