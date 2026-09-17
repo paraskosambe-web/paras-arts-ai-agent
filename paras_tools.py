@@ -1,4 +1,7 @@
 import os
+import re
+from datetime import datetime
+from typing import Any
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -20,10 +23,72 @@ if not MONGO_URI:
 # MONGODB
 # ============================================================
 
-client = MongoClient(MONGO_URI)
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=20000,
+)
 
 # REAL PARAS ARTS DATABASE
 db = client["test"]
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Prevent very large MongoDB results from being sent to Gemini.
+MAX_SEARCH_RESULTS = 50
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def serialize_value(value: Any):
+    """
+    Convert MongoDB/Python values into JSON-safe values.
+    """
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {
+            key: serialize_value(val)
+            for key, val in value.items()
+        }
+
+    if isinstance(value, list):
+        return [
+            serialize_value(item)
+            for item in value
+        ]
+
+    return value
+
+
+def serialize_documents(documents: list[dict]):
+    """
+    Convert MongoDB documents into JSON-safe dictionaries.
+    """
+
+    return [
+        serialize_value(document)
+        for document in documents
+    ]
+
+
+def safe_regex_pattern(value: str):
+    """
+    Escape user-provided search text before using it in MongoDB regex.
+
+    This prevents special regex characters from unexpectedly changing
+    the search behavior.
+    """
+
+    return re.escape(value.strip())
 
 
 # ============================================================
@@ -31,18 +96,25 @@ db = client["test"]
 # ============================================================
 
 
-def search_paras_orders(status: str | None = None):
+def search_paras_orders(
+    status: str | None = None,
+):
     """
     Search Paras Arts orders.
+
+    Only safe business fields are returned.
+    Sensitive customer information such as email, phone,
+    address and reference image URLs is intentionally excluded.
     """
 
     query = {}
 
     if status:
-        query["status"] = status
+        query["status"] = status.strip()
 
-    return list(
-        db["orders"].find(
+    documents = list(
+        db["orders"]
+        .find(
             query,
             {
                 "_id": 0,
@@ -57,7 +129,15 @@ def search_paras_orders(status: str | None = None):
                 "createdAt": 1,
             },
         )
+        .sort("createdAt", -1)
+        .limit(MAX_SEARCH_RESULTS)
     )
+
+    return {
+        "count_returned": len(documents),
+        "limit": MAX_SEARCH_RESULTS,
+        "orders": serialize_documents(documents),
+    }
 
 
 def analyze_paras_orders():
@@ -83,10 +163,10 @@ def analyze_paras_orders():
         db["orders"].aggregate(pipeline)
     )
 
-    return {
+    return serialize_value({
         "total_orders": db["orders"].count_documents({}),
         "by_status": results,
-    }
+    })
 
 
 def analyze_paras_payments():
@@ -112,10 +192,10 @@ def analyze_paras_payments():
         db["orders"].aggregate(pipeline)
     )
 
-    return {
+    return serialize_value({
         "total_orders": db["orders"].count_documents({}),
         "by_payment_status": results,
-    }
+    })
 
 
 def analyze_paras_sketch_types():
@@ -137,11 +217,11 @@ def analyze_paras_sketch_types():
         },
     ]
 
-    return {
+    return serialize_value({
         "by_sketch_type": list(
             db["orders"].aggregate(pipeline)
         )
-    }
+    })
 
 
 def analyze_paras_budgets():
@@ -162,10 +242,18 @@ def analyze_paras_budgets():
         {
             "$group": {
                 "_id": None,
-                "order_count": {"$sum": 1},
-                "average_budget": {"$avg": "$budget"},
-                "minimum_budget": {"$min": "$budget"},
-                "maximum_budget": {"$max": "$budget"},
+                "order_count": {
+                    "$sum": 1
+                },
+                "average_budget": {
+                    "$avg": "$budget"
+                },
+                "minimum_budget": {
+                    "$min": "$budget"
+                },
+                "maximum_budget": {
+                    "$max": "$budget"
+                },
                 "total_requested_budget": {
                     "$sum": "$budget"
                 },
@@ -190,7 +278,12 @@ def analyze_paras_budgets():
 
     result.pop("_id", None)
 
-    return result
+    return serialize_value(result)
+
+
+# ============================================================
+# ARTWORKS
+# ============================================================
 
 
 def search_paras_artworks(
@@ -204,13 +297,14 @@ def search_paras_artworks(
     query = {}
 
     if category:
-        query["category"] = category
+        query["category"] = category.strip()
 
     if featured is not None:
         query["featured"] = featured
 
-    return list(
-        db["artworks"].find(
+    documents = list(
+        db["artworks"]
+        .find(
             query,
             {
                 "_id": 0,
@@ -224,19 +318,29 @@ def search_paras_artworks(
                 "createdAt": 1,
             },
         )
+        .sort("createdAt", -1)
+        .limit(MAX_SEARCH_RESULTS)
     )
+
+    return {
+        "count_returned": len(documents),
+        "limit": MAX_SEARCH_RESULTS,
+        "artworks": serialize_documents(documents),
+    }
 
 
 def analyze_paras_artworks():
     """
-    Analyze artwork categories.
+    Analyze artwork categories and featured artworks.
     """
 
     pipeline = [
         {
             "$group": {
                 "_id": "$category",
-                "artwork_count": {"$sum": 1},
+                "artwork_count": {
+                    "$sum": 1
+                },
             }
         },
         {
@@ -246,15 +350,24 @@ def analyze_paras_artworks():
         },
     ]
 
-    return {
+    return serialize_value({
         "total_artworks": db["artworks"].count_documents({}),
+
         "featured_artworks": db["artworks"].count_documents(
-            {"featured": True}
+            {
+                "featured": True
+            }
         ),
+
         "by_category": list(
             db["artworks"].aggregate(pipeline)
         ),
-    }
+    })
+
+
+# ============================================================
+# SERVICES
+# ============================================================
 
 
 def search_paras_services(
@@ -262,15 +375,25 @@ def search_paras_services(
 ):
     """
     Search Paras Arts services.
+
+    If a title is provided, it performs a case-insensitive
+    partial title search instead of requiring an exact match.
     """
 
     query = {}
 
-    if title:
-        query["title"] = title
+    if title and title.strip():
 
-    return list(
-        db["services"].find(
+        search_text = safe_regex_pattern(title)
+
+        query["title"] = {
+            "$regex": search_text,
+            "$options": "i",
+        }
+
+    documents = list(
+        db["services"]
+        .find(
             query,
             {
                 "_id": 0,
@@ -281,28 +404,43 @@ def search_paras_services(
                 "createdAt": 1,
             },
         )
+        .sort("createdAt", -1)
+        .limit(MAX_SEARCH_RESULTS)
     )
+
+    return {
+        "count_returned": len(documents),
+        "limit": MAX_SEARCH_RESULTS,
+        "services": serialize_documents(documents),
+    }
 
 
 def analyze_paras_services():
     """
-    Analyze Paras Arts services.
+    Analyze Paras Arts services and pricing.
     """
 
-    return {
-        "total_services": db["services"].count_documents({}),
-        "services": list(
-            db["services"].find(
-                {},
-                {
-                    "_id": 0,
-                    "title": 1,
-                    "priceFrom": 1,
-                    "delivery": 1,
-                },
-            )
-        ),
-    }
+    documents = list(
+        db["services"].find(
+            {},
+            {
+                "_id": 0,
+                "title": 1,
+                "priceFrom": 1,
+                "delivery": 1,
+            },
+        )
+    )
+
+    return serialize_value({
+        "total_services": len(documents),
+        "services": documents,
+    })
+
+
+# ============================================================
+# FAQS
+# ============================================================
 
 
 def search_paras_faqs(
@@ -311,31 +449,39 @@ def search_paras_faqs(
 ):
     """
     Search Paras Arts FAQs.
+
+    Supports optional category and keyword filtering.
+    Keyword search checks both question and answer.
     """
 
     query = {}
 
-    if category:
-        query["category"] = category
+    if category and category.strip():
 
-    if keyword:
+        query["category"] = category.strip()
+
+    if keyword and keyword.strip():
+
+        safe_keyword = safe_regex_pattern(keyword)
+
         query["$or"] = [
             {
                 "question": {
-                    "$regex": keyword,
+                    "$regex": safe_keyword,
                     "$options": "i",
                 }
             },
             {
                 "answer": {
-                    "$regex": keyword,
+                    "$regex": safe_keyword,
                     "$options": "i",
                 }
             },
         ]
 
-    return list(
-        db["faqs"].find(
+    documents = list(
+        db["faqs"]
+        .find(
             query,
             {
                 "_id": 0,
@@ -345,7 +491,15 @@ def search_paras_faqs(
                 "createdAt": 1,
             },
         )
+        .sort("createdAt", -1)
+        .limit(MAX_SEARCH_RESULTS)
     )
+
+    return {
+        "count_returned": len(documents),
+        "limit": MAX_SEARCH_RESULTS,
+        "faqs": serialize_documents(documents),
+    }
 
 
 def analyze_paras_faqs():
@@ -357,7 +511,9 @@ def analyze_paras_faqs():
         {
             "$group": {
                 "_id": "$category",
-                "faq_count": {"$sum": 1},
+                "faq_count": {
+                    "$sum": 1
+                },
             }
         },
         {
@@ -367,12 +523,17 @@ def analyze_paras_faqs():
         },
     ]
 
-    return {
+    return serialize_value({
         "total_faqs": db["faqs"].count_documents({}),
         "by_category": list(
             db["faqs"].aggregate(pipeline)
         ),
-    }
+    })
+
+
+# ============================================================
+# BUSINESS SUMMARY
+# ============================================================
 
 
 def get_paras_business_summary():
@@ -388,7 +549,9 @@ def get_paras_business_summary():
                 {
                     "$group": {
                         "_id": "$status",
-                        "count": {"$sum": 1},
+                        "count": {
+                            "$sum": 1
+                        },
                     }
                 },
                 {
@@ -406,7 +569,9 @@ def get_paras_business_summary():
                 {
                     "$group": {
                         "_id": "$paymentStatus",
-                        "count": {"$sum": 1},
+                        "count": {
+                            "$sum": 1
+                        },
                     }
                 },
                 {
@@ -418,17 +583,27 @@ def get_paras_business_summary():
         )
     )
 
-    return {
+    return serialize_value({
         "orders": db["orders"].count_documents({}),
+
         "artworks": db["artworks"].count_documents({}),
+
         "services": db["services"].count_documents({}),
+
         "faqs": db["faqs"].count_documents({}),
+
         "testimonials": db["testimonials"].count_documents({}),
+
         "messages": db["messages"].count_documents({}),
-        "newsletter_subscribers": db["newsletters"].count_documents({}),
+
+        "newsletter_subscribers": (
+            db["newsletters"].count_documents({})
+        ),
+
         "orders_by_status": order_status,
+
         "orders_by_payment_status": payment_status,
-    }
+    })
 
 
 # ============================================================
@@ -436,8 +611,15 @@ def get_paras_business_summary():
 # ============================================================
 
 # IMPORTANT:
+#
 # These functions DO NOT ask for confirmation themselves.
-# The AI agent handles the confirmation before calling them.
+#
+# Confirmation is handled by api.py BEFORE these functions
+# are executed.
+#
+# These functions still perform their own validation as a
+# second security layer.
+# ============================================================
 
 
 ALLOWED_ORDER_STATUSES = {
@@ -448,11 +630,17 @@ ALLOWED_ORDER_STATUSES = {
     "Cancelled",
 }
 
+
 ALLOWED_PAYMENT_STATUSES = {
     "Pending",
     "Verified",
     "Failed",
 }
+
+
+# ============================================================
+# UPDATE ORDER STATUS
+# ============================================================
 
 
 def update_paras_order_status(
@@ -461,17 +649,25 @@ def update_paras_order_status(
 ):
     """
     Update the status of one Paras Arts order.
-
-    Only allowed status values can be used.
     """
+
+    if not order_id or not order_id.strip():
+        return {
+            "success": False,
+            "error": "Order ID is required.",
+        }
 
     if new_status not in ALLOWED_ORDER_STATUSES:
         return {
             "success": False,
             "error": (
-                f"Invalid order status: {new_status}"
+                f"Invalid order status: {new_status}. "
+                f"Allowed values: "
+                f"{', '.join(sorted(ALLOWED_ORDER_STATUSES))}."
             ),
         }
+
+    order_id = order_id.strip()
 
     order = db["orders"].find_one(
         {
@@ -506,7 +702,8 @@ def update_paras_order_status(
 
     result = db["orders"].update_one(
         {
-            "orderId": order_id
+            "orderId": order_id,
+            "status": old_status,
         },
         {
             "$set": {
@@ -516,19 +713,30 @@ def update_paras_order_status(
     )
 
     if result.modified_count == 1:
-
         return {
             "success": True,
             "changed": True,
             "orderId": order_id,
             "old_status": old_status,
             "new_status": new_status,
+            "message": (
+                f"Order {order_id} status changed "
+                f"from {old_status} to {new_status}."
+            ),
         }
 
     return {
         "success": False,
-        "error": "MongoDB update did not modify the order.",
+        "error": (
+            "MongoDB update did not modify the order. "
+            "The order may have changed before confirmation."
+        ),
     }
+
+
+# ============================================================
+# UPDATE PAYMENT STATUS
+# ============================================================
 
 
 def update_paras_payment_status(
@@ -539,14 +747,24 @@ def update_paras_payment_status(
     Update payment status for one Paras Arts order.
     """
 
+    if not order_id or not order_id.strip():
+        return {
+            "success": False,
+            "error": "Order ID is required.",
+        }
+
     if new_payment_status not in ALLOWED_PAYMENT_STATUSES:
         return {
             "success": False,
             "error": (
                 f"Invalid payment status: "
-                f"{new_payment_status}"
+                f"{new_payment_status}. "
+                f"Allowed values: "
+                f"{', '.join(sorted(ALLOWED_PAYMENT_STATUSES))}."
             ),
         }
+
+    order_id = order_id.strip()
 
     order = db["orders"].find_one(
         {
@@ -576,12 +794,15 @@ def update_paras_payment_status(
             "orderId": order_id,
             "old_payment_status": old_status,
             "new_payment_status": new_payment_status,
-            "message": "Payment already has this status.",
+            "message": (
+                "Payment already has this status."
+            ),
         }
 
     result = db["orders"].update_one(
         {
-            "orderId": order_id
+            "orderId": order_id,
+            "paymentStatus": old_status,
         },
         {
             "$set": {
@@ -591,21 +812,31 @@ def update_paras_payment_status(
     )
 
     if result.modified_count == 1:
-
         return {
             "success": True,
             "changed": True,
             "orderId": order_id,
             "old_payment_status": old_status,
             "new_payment_status": new_payment_status,
+            "message": (
+                f"Payment status for order {order_id} "
+                f"changed from {old_status} "
+                f"to {new_payment_status}."
+            ),
         }
 
     return {
         "success": False,
         "error": (
-            "MongoDB update did not modify the payment status."
+            "MongoDB update did not modify the payment status. "
+            "The order may have changed before confirmation."
         ),
     }
+
+
+# ============================================================
+# UPDATE ARTWORK FEATURED STATUS
+# ============================================================
 
 
 def update_paras_artwork_featured(
@@ -613,8 +844,16 @@ def update_paras_artwork_featured(
     featured: bool,
 ):
     """
-    Change the featured status of an artwork.
+    Change the featured status of one artwork.
     """
+
+    if not title or not title.strip():
+        return {
+            "success": False,
+            "error": "Artwork title is required.",
+        }
+
+    title = title.strip()
 
     artwork = db["artworks"].find_one(
         {
@@ -651,7 +890,8 @@ def update_paras_artwork_featured(
 
     result = db["artworks"].update_one(
         {
-            "title": title
+            "title": title,
+            "featured": old_value,
         },
         {
             "$set": {
@@ -661,21 +901,30 @@ def update_paras_artwork_featured(
     )
 
     if result.modified_count == 1:
-
         return {
             "success": True,
             "changed": True,
             "title": title,
             "old_featured": old_value,
             "new_featured": featured,
+            "message": (
+                f"Artwork '{title}' featured status "
+                f"changed to {featured}."
+            ),
         }
 
     return {
         "success": False,
         "error": (
-            "MongoDB update did not modify the artwork."
+            "MongoDB update did not modify the artwork. "
+            "The artwork may have changed before confirmation."
         ),
     }
+
+
+# ============================================================
+# UPDATE SERVICE PRICE
+# ============================================================
 
 
 def update_paras_service_price(
@@ -683,14 +932,30 @@ def update_paras_service_price(
     new_price: float,
 ):
     """
-    Update the starting price of a service.
+    Update the starting price of one service.
     """
+
+    if not title or not title.strip():
+        return {
+            "success": False,
+            "error": "Service title is required.",
+        }
+
+    try:
+        new_price = float(new_price)
+    except (TypeError, ValueError):
+        return {
+            "success": False,
+            "error": "Service price must be a valid number.",
+        }
 
     if new_price < 0:
         return {
             "success": False,
             "error": "Price cannot be negative.",
         }
+
+    title = title.strip()
 
     service = db["services"].find_one(
         {
@@ -727,7 +992,8 @@ def update_paras_service_price(
 
     result = db["services"].update_one(
         {
-            "title": title
+            "title": title,
+            "priceFrom": old_price,
         },
         {
             "$set": {
@@ -737,21 +1003,30 @@ def update_paras_service_price(
     )
 
     if result.modified_count == 1:
-
         return {
             "success": True,
             "changed": True,
             "title": title,
             "old_price": old_price,
             "new_price": new_price,
+            "message": (
+                f"Service '{title}' price changed "
+                f"from ₹{old_price} to ₹{new_price}."
+            ),
         }
 
     return {
         "success": False,
         "error": (
-            "MongoDB update did not modify the service."
+            "MongoDB update did not modify the service. "
+            "The service may have changed before confirmation."
         ),
     }
+
+
+# ============================================================
+# UPDATE FAQ ANSWER
+# ============================================================
 
 
 def update_paras_faq_answer(
@@ -762,11 +1037,20 @@ def update_paras_faq_answer(
     Update the answer of one FAQ identified by its question.
     """
 
-    if not new_answer.strip():
+    if not question or not question.strip():
+        return {
+            "success": False,
+            "error": "FAQ question is required.",
+        }
+
+    if not new_answer or not new_answer.strip():
         return {
             "success": False,
             "error": "FAQ answer cannot be empty.",
         }
+
+    question = question.strip()
+    new_answer = new_answer.strip()
 
     faq = db["faqs"].find_one(
         {
@@ -794,12 +1078,15 @@ def update_paras_faq_answer(
             "success": True,
             "changed": False,
             "question": question,
-            "message": "FAQ answer is already the same.",
+            "message": (
+                "FAQ answer is already the same."
+            ),
         }
 
     result = db["faqs"].update_one(
         {
-            "question": question
+            "question": question,
+            "answer": old_answer,
         },
         {
             "$set": {
@@ -809,19 +1096,20 @@ def update_paras_faq_answer(
     )
 
     if result.modified_count == 1:
-
         return {
             "success": True,
             "changed": True,
             "question": question,
-            "old_answer": old_answer,
-            "new_answer": new_answer,
+            "message": (
+                "FAQ answer updated successfully."
+            ),
         }
 
     return {
         "success": False,
         "error": (
-            "MongoDB update did not modify the FAQ."
+            "MongoDB update did not modify the FAQ. "
+            "The FAQ may have changed before confirmation."
         ),
     }
 
@@ -836,20 +1124,40 @@ if __name__ == "__main__":
     print(" Paras Arts MongoDB Tools")
     print("======================================")
 
-    print("\nBusiness Summary:")
-    print(get_paras_business_summary())
+    try:
 
-    print("\nBudget Analysis:")
-    print(analyze_paras_budgets())
+        # Test MongoDB connection
+        client.admin.command("ping")
 
-    print("\nSketch Type Analysis:")
-    print(analyze_paras_sketch_types())
+        print("\nMongoDB connection: OK")
 
-    print("\nArtwork Analysis:")
-    print(analyze_paras_artworks())
+        print("\nDatabase:")
+        print(db.name)
 
-    print("\nFAQ Analysis:")
-    print(analyze_paras_faqs())
+        print("\nBusiness Summary:")
+        print(get_paras_business_summary())
 
-    print("\nWrite tools loaded successfully.")
-    print("No write operation was executed.")
+        print("\nBudget Analysis:")
+        print(analyze_paras_budgets())
+
+        print("\nSketch Type Analysis:")
+        print(analyze_paras_sketch_types())
+
+        print("\nArtwork Analysis:")
+        print(analyze_paras_artworks())
+
+        print("\nService Analysis:")
+        print(analyze_paras_services())
+
+        print("\nFAQ Analysis:")
+        print(analyze_paras_faqs())
+
+        print("\nWrite tools loaded successfully.")
+        print("No write operation was executed.")
+
+    except Exception as error:
+
+        print(
+            f"\nMongoDB/tool error: "
+            f"{type(error).__name__}: {error}"
+        )

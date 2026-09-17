@@ -1,6 +1,11 @@
 fastapi
+
 uvicorn[standard]
+
 pymongo==4.18.1
+
 python-dotenv==1.2.3
+
 google-genai==2.23.0
+
 dnspython==2.8.0

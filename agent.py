@@ -1,29 +1,38 @@
 import os
-import json
+import time
+import random
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 from paras_tools import (
+    db,
+
+    # Read / analysis tools
     search_paras_orders,
     analyze_paras_orders,
     analyze_paras_payments,
     analyze_paras_sketch_types,
     analyze_paras_budgets,
+
     search_paras_artworks,
     analyze_paras_artworks,
+
     search_paras_services,
     analyze_paras_services,
+
     search_paras_faqs,
     analyze_paras_faqs,
+
     get_paras_business_summary,
+
+    # Write tools
     update_paras_order_status,
     update_paras_payment_status,
     update_paras_artwork_featured,
     update_paras_service_price,
     update_paras_faq_answer,
-    db,
 )
 
 
@@ -36,262 +45,355 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set in .env")
+    raise RuntimeError(
+        "GEMINI_API_KEY is missing from your .env file."
+    )
 
 
 # ============================================================
-# GEMINI
+# GEMINI CLIENT
 # ============================================================
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-MODEL = "gemini-3.6-flash"
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
 
 
 # ============================================================
-# TOOL DEFINITIONS
+# GEMINI MODELS
+# ============================================================
+
+# Primary model first.
+# If temporarily unavailable, move to the next model.
+
+MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+]
+
+MAX_RETRIES_PER_MODEL = 1
+
+
+# ============================================================
+# TOOL DECLARATIONS
 # ============================================================
 
 tools = types.Tool(
     function_declarations=[
-        # ----------------------------
-        # READ / ANALYSIS TOOLS
-        # ----------------------------
 
-        types.FunctionDeclaration(
-            name="search_paras_orders",
-            description="Search Paras Arts orders. Optionally filter by order status.",
-            parameters_json_schema={
-                "type": "object",
+        # ----------------------------------------------------
+        # ORDERS
+        # ----------------------------------------------------
+
+        {
+            "name": "search_paras_orders",
+            "description": (
+                "Search Paras Arts orders using safe filters "
+                "such as status, payment status, sketch type, "
+                "or order ID."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "status": {
-                        "type": "string",
-                        "description": "Optional order status such as Pending, Accepted, In Progress, Completed, or Cancelled."
+                        "type": "STRING",
+                        "description": "Optional order status."
+                    },
+                    "payment_status": {
+                        "type": "STRING",
+                        "description": "Optional payment status."
+                    },
+                    "sketch_type": {
+                        "type": "STRING",
+                        "description": "Optional sketch type."
+                    },
+                    "order_id": {
+                        "type": "STRING",
+                        "description": "Optional order ID."
                     }
                 }
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_orders",
-            description="Analyze the total number of Paras Arts orders and group them by status.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_orders",
+            "description": (
+                "Analyze Paras Arts orders and return total "
+                "orders and order status counts."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_payments",
-            description="Analyze Paras Arts orders by payment status.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_payments",
+            "description": (
+                "Analyze payment status counts for Paras Arts orders."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_sketch_types",
-            description="Analyze Paras Arts orders by sketch type.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_sketch_types",
+            "description": (
+                "Analyze Paras Arts orders by sketch type."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_budgets",
-            description="Analyze requested order budgets. These values are not revenue.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_budgets",
+            "description": (
+                "Analyze customer budget values from Paras Arts "
+                "orders. This is not revenue."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="search_paras_artworks",
-            description="Search Paras Arts artworks by category or featured status.",
-            parameters_json_schema={
-                "type": "object",
+        # ----------------------------------------------------
+        # ARTWORKS
+        # ----------------------------------------------------
+
+        {
+            "name": "search_paras_artworks",
+            "description": (
+                "Search Paras Arts artworks using category "
+                "or featured status filters."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "category": {
-                        "type": "string",
+                        "type": "STRING",
                         "description": "Optional artwork category."
                     },
                     "featured": {
-                        "type": "boolean",
+                        "type": "BOOLEAN",
                         "description": "Optional featured filter."
                     }
                 }
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_artworks",
-            description="Analyze Paras Arts artworks by category and featured status.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_artworks",
+            "description": (
+                "Analyze Paras Arts artwork counts and categories."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="search_paras_services",
-            description="Search Paras Arts services by title.",
-            parameters_json_schema={
-                "type": "object",
+        # ----------------------------------------------------
+        # SERVICES
+        # ----------------------------------------------------
+
+        {
+            "name": "search_paras_services",
+            "description": (
+                "Search Paras Arts services by title."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "title": {
-                        "type": "string",
+                        "type": "STRING",
                         "description": "Optional service title."
                     }
                 }
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_services",
-            description="Analyze Paras Arts services and their starting prices.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_services",
+            "description": (
+                "Analyze Paras Arts service data."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="search_paras_faqs",
-            description="Search Paras Arts FAQs by category or keyword.",
-            parameters_json_schema={
-                "type": "object",
+        # ----------------------------------------------------
+        # FAQS
+        # ----------------------------------------------------
+
+        {
+            "name": "search_paras_faqs",
+            "description": (
+                "Search Paras Arts FAQs by category or keyword."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "category": {
-                        "type": "string",
+                        "type": "STRING",
                         "description": "Optional FAQ category."
                     },
                     "keyword": {
-                        "type": "string",
-                        "description": "Optional keyword to search in questions and answers."
+                        "type": "STRING",
+                        "description": "Optional keyword."
                     }
                 }
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="analyze_paras_faqs",
-            description="Analyze Paras Arts FAQs by category.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "analyze_paras_faqs",
+            "description": (
+                "Analyze Paras Arts FAQ data."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="get_paras_business_summary",
-            description="Get an overall read-only summary of the Paras Arts database.",
-            parameters_json_schema={
-                "type": "object",
+        # ----------------------------------------------------
+        # BUSINESS SUMMARY
+        # ----------------------------------------------------
+
+        {
+            "name": "get_paras_business_summary",
+            "description": (
+                "Get a high-level summary of Paras Arts business "
+                "data including orders, artworks, services, FAQs, "
+                "testimonials, messages, and newsletters."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {}
-            },
-        ),
+            }
+        },
 
-        # ----------------------------
+        # ----------------------------------------------------
         # WRITE TOOLS
-        # ----------------------------
+        # ----------------------------------------------------
 
-        types.FunctionDeclaration(
-            name="update_paras_order_status",
-            description="Update the status of one Paras Arts order. Only use after explicit user confirmation.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "update_paras_order_status",
+            "description": (
+                "Update the status of a Paras Arts order."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "order_id": {
-                        "type": "string",
-                        "description": "Paras Arts order ID."
+                        "type": "STRING"
                     },
                     "new_status": {
-                        "type": "string",
-                        "description": "New order status."
+                        "type": "STRING"
                     }
                 },
-                "required": ["order_id", "new_status"]
-            },
-        ),
+                "required": [
+                    "order_id",
+                    "new_status"
+                ]
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="update_paras_payment_status",
-            description="Update the payment status of one Paras Arts order. Only use after explicit user confirmation.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "update_paras_payment_status",
+            "description": (
+                "Update the payment status of a Paras Arts order."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "order_id": {
-                        "type": "string",
-                        "description": "Paras Arts order ID."
+                        "type": "STRING"
                     },
                     "new_payment_status": {
-                        "type": "string",
-                        "description": "New payment status."
+                        "type": "STRING"
                     }
                 },
-                "required": ["order_id", "new_payment_status"]
-            },
-        ),
+                "required": [
+                    "order_id",
+                    "new_payment_status"
+                ]
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="update_paras_artwork_featured",
-            description="Change whether a Paras Arts artwork is featured. Only use after explicit user confirmation.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "update_paras_artwork_featured",
+            "description": (
+                "Update whether a Paras Arts artwork is featured."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "title": {
-                        "type": "string",
-                        "description": "Artwork title."
+                        "type": "STRING"
                     },
                     "featured": {
-                        "type": "boolean",
-                        "description": "Whether the artwork should be featured."
+                        "type": "BOOLEAN"
                     }
                 },
-                "required": ["title", "featured"]
-            },
-        ),
+                "required": [
+                    "title",
+                    "featured"
+                ]
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="update_paras_service_price",
-            description="Update the starting price of a Paras Arts service. Only use after explicit user confirmation.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "update_paras_service_price",
+            "description": (
+                "Update the starting price of a Paras Arts service."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "title": {
-                        "type": "string",
-                        "description": "Service title."
+                        "type": "STRING"
                     },
                     "new_price": {
-                        "type": "number",
-                        "description": "New starting price."
+                        "type": "NUMBER"
                     }
                 },
-                "required": ["title", "new_price"]
-            },
-        ),
+                "required": [
+                    "title",
+                    "new_price"
+                ]
+            }
+        },
 
-        types.FunctionDeclaration(
-            name="update_paras_faq_answer",
-            description="Update the answer of a Paras Arts FAQ. Only use after explicit user confirmation.",
-            parameters_json_schema={
-                "type": "object",
+        {
+            "name": "update_paras_faq_answer",
+            "description": (
+                "Update the answer to a Paras Arts FAQ."
+            ),
+            "parameters": {
+                "type": "OBJECT",
                 "properties": {
                     "question": {
-                        "type": "string",
-                        "description": "Exact FAQ question."
+                        "type": "STRING"
                     },
                     "new_answer": {
-                        "type": "string",
-                        "description": "New FAQ answer."
+                        "type": "STRING"
                     }
                 },
-                "required": ["question", "new_answer"]
-            },
-        ),
+                "required": [
+                    "question",
+                    "new_answer"
+                ]
+            }
+        },
     ]
 )
 
@@ -301,17 +403,22 @@ tools = types.Tool(
 # ============================================================
 
 available_functions = {
+
     "search_paras_orders": search_paras_orders,
     "analyze_paras_orders": analyze_paras_orders,
     "analyze_paras_payments": analyze_paras_payments,
     "analyze_paras_sketch_types": analyze_paras_sketch_types,
     "analyze_paras_budgets": analyze_paras_budgets,
+
     "search_paras_artworks": search_paras_artworks,
     "analyze_paras_artworks": analyze_paras_artworks,
+
     "search_paras_services": search_paras_services,
     "analyze_paras_services": analyze_paras_services,
+
     "search_paras_faqs": search_paras_faqs,
     "analyze_paras_faqs": analyze_paras_faqs,
+
     "get_paras_business_summary": get_paras_business_summary,
 
     "update_paras_order_status": update_paras_order_status,
@@ -321,6 +428,10 @@ available_functions = {
     "update_paras_faq_answer": update_paras_faq_answer,
 }
 
+
+# ============================================================
+# WRITE TOOLS
+# ============================================================
 
 WRITE_TOOLS = {
     "update_paras_order_status",
@@ -338,51 +449,207 @@ WRITE_TOOLS = {
 SYSTEM_INSTRUCTION = """
 You are the Paras Arts AI Data Analyst and Data Management Agent.
 
-You work with the real Paras Arts MongoDB database.
+You work with the Paras Arts MongoDB database.
 
-You can:
-1. Search business data.
-2. Analyze business data.
-3. Answer questions using MongoDB data.
-4. Perform a small set of controlled database updates.
+Your responsibilities:
 
-IMPORTANT SECURITY RULES:
+1. Search and analyze Paras Arts business data.
+2. Answer questions using actual database data.
+3. Perform only approved database updates when explicitly
+   confirmed by the Python application.
 
-- Never access the admins collection.
-- Never expose passwords, authentication credentials, phone numbers,
-  email addresses, physical addresses, or reference image URLs.
-- Do not invent database information.
-- Use MongoDB tools when the user's question requires actual database data.
-- Requested order budgets are not revenue.
-- Do not perform delete operations.
-- Do not execute arbitrary MongoDB commands.
+DATABASE SECURITY:
+
+- NEVER access the admins collection.
+- NEVER reveal passwords or credentials.
+- NEVER reveal customer phone numbers.
+- NEVER reveal customer email addresses.
+- NEVER reveal customer physical addresses.
+- NEVER reveal reference image URLs.
+- NEVER execute arbitrary MongoDB commands.
+- NEVER delete database records.
+- NEVER modify fields outside the approved write tools.
+- NEVER invent database information.
+
+DATA INTERPRETATION:
+
+- Customer budget is NOT revenue.
+- Payment status is NOT order status.
+- If the database does not contain enough information, say so.
+- Do not invent values.
+
+READ OPERATIONS:
+
+You may use the available search and analysis tools to retrieve
+actual Paras Arts data.
 
 WRITE OPERATIONS:
 
-Available controlled writes are:
-- Change order status.
-- Change payment status.
-- Change artwork featured status.
-- Change service starting price.
-- Change FAQ answer.
+The following operations are allowed:
 
-A write operation must only happen after the Python application
-obtains explicit confirmation from the user.
+- Update order status
+- Update payment status
+- Update artwork featured status
+- Update service price
+- Update FAQ answer
 
-Do not claim that a write happened unless the write tool actually
-returns a successful result.
+A write operation MUST NOT be executed until the Python
+application gets explicit confirmation from the user.
+
+RESPONSE STYLE:
+
+- Be concise.
+- Use headings when useful.
+- Use bullet points for lists.
+- Use small tables when appropriate.
+- Clearly distinguish database facts from calculations.
+- Give direct answers to simple questions.
+- Do not expose unnecessary customer information.
 """
 
 
 # ============================================================
-# CONFIRMATION DATA HELPERS
+# RETRY DETECTION
+# ============================================================
+
+def is_retryable_gemini_error(error):
+    """
+    Check whether a Gemini error is temporary and
+    suitable for retry/fallback.
+    """
+
+    error_text = str(error).lower()
+
+    retry_markers = [
+        "503",
+        "unavailable",
+        "service unavailable",
+        "temporarily unavailable",
+        "overloaded",
+        "429",
+        "resource exhausted",
+        "rate limit",
+        "timeout",
+        "timed out",
+    ]
+
+    return any(
+        marker in error_text
+        for marker in retry_markers
+    )
+
+
+# ============================================================
+# GEMINI CALL WITH FALLBACK
+# ============================================================
+
+def generate_with_fallback(contents):
+    """
+    Try Gemini models in order.
+
+    Primary:
+        gemini-3.8-flash
+
+    Fallback:
+        gemini-3.7-flash
+        gemini-3.6-flash
+    """
+
+    last_error = None
+
+    for model_index, model in enumerate(MODELS):
+
+        for retry_number in range(
+            MAX_RETRIES_PER_MODEL + 1
+        ):
+
+            try:
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        tools=[tools],
+                        automatic_function_calling=(
+                            types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            )
+                        ),
+                        temperature=0.2,
+                        max_output_tokens=800,
+                    ),
+                )
+
+                if model_index > 0:
+
+                    print(
+                        f"\n✅ Fallback successful: {model}"
+                    )
+
+                return response
+
+            except Exception as error:
+
+                last_error = error
+
+                if not is_retryable_gemini_error(error):
+                    raise
+
+                # Retry current model once
+                if retry_number < MAX_RETRIES_PER_MODEL:
+
+                    delay = (
+                        1.0 +
+                        random.uniform(0.1, 0.5)
+                    )
+
+                    print(
+                        f"\n⚠️ {model} temporarily unavailable."
+                        f" Retrying in {delay:.1f}s..."
+                    )
+
+                    time.sleep(delay)
+
+                else:
+
+                    # Move to next model
+                    if model_index < len(MODELS) - 1:
+
+                        next_model = MODELS[
+                            model_index + 1
+                        ]
+
+                        print(
+                            f"\n⚠️ {model} unavailable."
+                            f" Switching to {next_model}..."
+                        )
+
+                    else:
+
+                        print(
+                            "\n❌ All Gemini models are "
+                            "currently unavailable."
+                        )
+
+    if last_error:
+        raise last_error
+
+    raise RuntimeError(
+        "Gemini request failed without a specific error."
+    )
+
+
+# ============================================================
+# CONFIRMATION HELPERS
 # ============================================================
 
 def get_order_for_confirmation(order_id):
-    return db["orders"].find_one(
+
+    return db.orders.find_one(
         {"orderId": order_id},
         {
-            "_id": 0,
+            "_id": 1,
             "orderId": 1,
             "fullName": 1,
             "sketchType": 1,
@@ -394,10 +661,11 @@ def get_order_for_confirmation(order_id):
 
 
 def get_artwork_for_confirmation(title):
-    return db["artworks"].find_one(
+
+    return db.artworks.find_one(
         {"title": title},
         {
-            "_id": 0,
+            "_id": 1,
             "title": 1,
             "category": 1,
             "featured": 1,
@@ -406,10 +674,11 @@ def get_artwork_for_confirmation(title):
 
 
 def get_service_for_confirmation(title):
-    return db["services"].find_one(
+
+    return db.services.find_one(
         {"title": title},
         {
-            "_id": 0,
+            "_id": 1,
             "title": 1,
             "priceFrom": 1,
         },
@@ -417,10 +686,11 @@ def get_service_for_confirmation(title):
 
 
 def get_faq_for_confirmation(question):
-    return db["faqs"].find_one(
+
+    return db.faqs.find_one(
         {"question": question},
         {
-            "_id": 0,
+            "_id": 1,
             "question": 1,
             "answer": 1,
         },
@@ -428,13 +698,13 @@ def get_faq_for_confirmation(question):
 
 
 # ============================================================
-# CONFIRMATION
+# WRITE CONFIRMATION
 # ============================================================
 
 def ask_for_confirmation(function_name, args):
 
     print("\n" + "=" * 55)
-    print("⚠️  WRITE OPERATION REQUESTED")
+    print("WRITE OPERATION REQUIRES CONFIRMATION")
     print("=" * 55)
 
     if function_name == "update_paras_order_status":
@@ -445,14 +715,23 @@ def ask_for_confirmation(function_name, args):
         order = get_order_for_confirmation(order_id)
 
         if not order:
-            print(f"Order {order_id} was not found.")
+            print(
+                f"Order '{order_id}' was not found."
+            )
             return False
 
-        print(f"Order ID       : {order_id}")
-        print(f"Customer       : {order.get('fullName', 'N/A')}")
-        print(f"Sketch Type    : {order.get('sketchType', 'N/A')}")
-        print(f"Current Status : {order.get('status', 'N/A')}")
-        print(f"New Status     : {new_status}")
+        print(
+            f"Order ID: {order.get('orderId')}"
+        )
+        print(
+            f"Customer: {order.get('fullName')}"
+        )
+        print(
+            f"Current status: {order.get('status')}"
+        )
+        print(
+            f"New status: {new_status}"
+        )
 
     elif function_name == "update_paras_payment_status":
 
@@ -462,12 +741,21 @@ def ask_for_confirmation(function_name, args):
         order = get_order_for_confirmation(order_id)
 
         if not order:
-            print(f"Order {order_id} was not found.")
+            print(
+                f"Order '{order_id}' was not found."
+            )
             return False
 
-        print(f"Order ID          : {order_id}")
-        print(f"Current Payment   : {order.get('paymentStatus', 'N/A')}")
-        print(f"New Payment       : {new_status}")
+        print(
+            f"Order ID: {order.get('orderId')}"
+        )
+        print(
+            f"Current payment status: "
+            f"{order.get('paymentStatus')}"
+        )
+        print(
+            f"New payment status: {new_status}"
+        )
 
     elif function_name == "update_paras_artwork_featured":
 
@@ -477,13 +765,21 @@ def ask_for_confirmation(function_name, args):
         artwork = get_artwork_for_confirmation(title)
 
         if not artwork:
-            print(f"Artwork '{title}' was not found.")
+            print(
+                f"Artwork '{title}' was not found."
+            )
             return False
 
-        print(f"Artwork           : {title}")
-        print(f"Category          : {artwork.get('category', 'N/A')}")
-        print(f"Current Featured  : {artwork.get('featured', False)}")
-        print(f"New Featured      : {featured}")
+        print(
+            f"Artwork: {artwork.get('title')}"
+        )
+        print(
+            f"Current featured: "
+            f"{artwork.get('featured')}"
+        )
+        print(
+            f"New featured: {featured}"
+        )
 
     elif function_name == "update_paras_service_price":
 
@@ -493,12 +789,20 @@ def ask_for_confirmation(function_name, args):
         service = get_service_for_confirmation(title)
 
         if not service:
-            print(f"Service '{title}' was not found.")
+            print(
+                f"Service '{title}' was not found."
+            )
             return False
 
-        print(f"Service           : {title}")
-        print(f"Current Price     : ₹{service.get('priceFrom', 'N/A')}")
-        print(f"New Price         : ₹{new_price}")
+        print(
+            f"Service: {service.get('title')}"
+        )
+        print(
+            f"Current price: ₹{service.get('priceFrom')}"
+        )
+        print(
+            f"New price: ₹{new_price}"
+        )
 
     elif function_name == "update_paras_faq_answer":
 
@@ -508,142 +812,243 @@ def ask_for_confirmation(function_name, args):
         faq = get_faq_for_confirmation(question)
 
         if not faq:
-            print("FAQ with that question was not found.")
+            print(
+                f"FAQ '{question}' was not found."
+            )
             return False
 
-        print(f"FAQ Question      : {question}")
-        print(f"Current Answer    : {faq.get('answer', 'N/A')}")
-        print(f"New Answer        : {new_answer}")
+        print(
+            f"Question: {faq.get('question')}"
+        )
+        print(
+            f"Current answer: {faq.get('answer')}"
+        )
+        print(
+            f"New answer: {new_answer}"
+        )
 
     else:
+
         return False
 
     print("=" * 55)
-    print("Type YES to confirm this database change.")
-    print("Type NO to cancel.")
-    print("=" * 55)
 
-    while True:
-        confirmation = input("Confirmation: ").strip().upper()
+    confirmation = input(
+        "Type YES to confirm or NO to cancel: "
+    ).strip().lower()
 
-        if confirmation == "YES":
-            print("✅ Confirmed.")
-            return True
-
-        if confirmation == "NO":
-            print("❌ Write operation cancelled.")
-            return False
-
-        print("Please type YES or NO.")
+    return confirmation in {
+        "yes",
+        "y",
+        "confirm",
+        "confirmed",
+    }
 
 
 # ============================================================
-# AGENT REQUEST
+# AGENT LOOP
 # ============================================================
 
 def run_agent(user_prompt):
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            tools=[tools],
-            temperature=0,
-        ),
-    )
-
-    # --------------------------------------------------------
-    # Handle function calls
-    # --------------------------------------------------------
-
-    while response.function_calls:
-
-        function_call = response.function_calls[0]
-
-        function_name = function_call.name
-        args = dict(function_call.args or {})
-
-        print(f"\n🔧 Tool selected: {function_name}")
-
-        if function_name not in available_functions:
-            return "The requested tool is not available."
-
-        function_to_call = available_functions[function_name]
-
-        # ----------------------------------------------------
-        # WRITE OPERATION
-        # ----------------------------------------------------
-
-        if function_name in WRITE_TOOLS:
-
-            confirmed = ask_for_confirmation(
-                function_name,
-                args,
-            )
-
-            if not confirmed:
-                return "The database change was cancelled."
-
-        # ----------------------------------------------------
-        # EXECUTE TOOL
-        # ----------------------------------------------------
-
-        try:
-            result = function_to_call(**args)
-
-        except Exception as e:
-            return f"Tool execution error: {e}"
-
-        print("\n📊 Tool result:")
-        print(result)
-
-        # ----------------------------------------------------
-        # Send result back to Gemini
-        # ----------------------------------------------------
-
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                user_prompt,
-                types.Part.from_function_response(
-                    name=function_name,
-                    response={
-                        "result": result
-                    },
-                ),
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    text=user_prompt
+                )
             ],
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                tools=[tools],
-                temperature=0,
-            ),
+        )
+    ]
+
+    MAX_ITERATIONS = 4
+
+    for _ in range(MAX_ITERATIONS):
+
+        response = generate_with_fallback(
+            contents
         )
 
-    return response.text
+        # ----------------------------------------------------
+        # NORMAL RESPONSE
+        # ----------------------------------------------------
+
+        if not response.function_calls:
+
+            return response.text
+
+        # ----------------------------------------------------
+        # ADD GEMINI RESPONSE
+        # ----------------------------------------------------
+
+        if response.candidates:
+
+            contents.append(
+                response.candidates[0].content
+            )
+
+        # ----------------------------------------------------
+        # PROCESS FUNCTION CALLS
+        # ----------------------------------------------------
+
+        tool_responses = []
+
+        for function_call in response.function_calls:
+
+            function_name = function_call.name
+
+            args = dict(
+                function_call.args or {}
+            )
+
+            # ------------------------------------------------
+            # UNKNOWN TOOL
+            # ------------------------------------------------
+
+            if function_name not in available_functions:
+
+                tool_responses.append(
+                    types.Part.from_function_response(
+                        name=function_name,
+                        response={
+                            "error": (
+                                f"Unknown function: "
+                                f"{function_name}"
+                            )
+                        },
+                    )
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # WRITE TOOL
+            # ------------------------------------------------
+
+            if function_name in WRITE_TOOLS:
+
+                confirmed = ask_for_confirmation(
+                    function_name,
+                    args
+                )
+
+                if not confirmed:
+
+                    result = {
+                        "success": False,
+                        "message": (
+                            "Write operation was "
+                            "cancelled by the user."
+                        ),
+                    }
+
+                else:
+
+                    try:
+
+                        result = available_functions[
+                            function_name
+                        ](**args)
+
+                    except Exception as error:
+
+                        result = {
+                            "success": False,
+                            "error": str(error),
+                        }
+
+                tool_responses.append(
+                    types.Part.from_function_response(
+                        name=function_name,
+                        response={
+                            "result": result
+                        },
+                    )
+                )
+
+            # ------------------------------------------------
+            # READ TOOL
+            # ------------------------------------------------
+
+            else:
+
+                try:
+
+                    result = available_functions[
+                        function_name
+                    ](**args)
+
+                except Exception as error:
+
+                    result = {
+                        "success": False,
+                        "error": str(error),
+                    }
+
+                tool_responses.append(
+                    types.Part.from_function_response(
+                        name=function_name,
+                        response={
+                            "result": result
+                        },
+                    )
+                )
+
+        # ----------------------------------------------------
+        # SEND TOOL RESULTS BACK TO GEMINI
+        # ----------------------------------------------------
+
+        contents.append(
+            types.Content(
+                role="user",
+                parts=tool_responses,
+            )
+        )
+
+    return (
+        "I couldn't complete the analysis within "
+        "the allowed number of steps."
+    )
 
 
 # ============================================================
-# MAIN CHAT LOOP
+# CLI
 # ============================================================
 
 def main():
 
-    print("\n======================================")
+    print("=" * 38)
     print(" Paras Arts AI Data Agent")
-    print("======================================")
+    print("=" * 38)
+
     print("MongoDB: test")
-    print(f"Gemini Model: {MODEL}")
-    print("\nAI Data Analyst + Data Management Agent")
+    print(
+        f"Gemini Models: {', '.join(MODELS)}"
+    )
+
+    print(
+        "\nAI Data Analyst + Data Management Agent"
+    )
     print("Type 'exit' to quit.")
-    print("======================================")
+
+    print("=" * 38)
 
     while True:
 
         try:
-            user_prompt = input("\nYou: ").strip()
 
-        except (KeyboardInterrupt, EOFError):
+            user_prompt = input(
+                "\nYou: "
+            ).strip()
+
+        except KeyboardInterrupt:
+
+            print("\n\nAgent stopped.")
+            break
+
+        except EOFError:
+
             print("\n\nAgent stopped.")
             break
 
@@ -653,24 +1058,28 @@ def main():
         if user_prompt.lower() in {
             "exit",
             "quit",
-            "q",
         }:
+
             print("\nAgent stopped.")
             break
 
         try:
-            answer = run_agent(user_prompt)
 
-            print("\n🤖 Agent:")
+            answer = run_agent(
+                user_prompt
+            )
+
+            print("\nAgent:")
             print(answer)
 
-        except Exception as e:
+        except Exception as error:
+
             print("\n❌ Error:")
-            print(e)
+            print(error)
 
 
 # ============================================================
-# START PROGRAM
+# START
 # ============================================================
 
 if __name__ == "__main__":
