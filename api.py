@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 from google import genai
 from google.genai import types
 
@@ -702,13 +703,11 @@ def is_retryable_gemini_error(error: Exception) -> bool:
 # ============================================================
 
 def generate_with_retry(contents):
-
     last_error = None
 
     for attempt in range(MAX_GEMINI_RETRIES + 1):
 
         try:
-
             return client.models.generate_content(
                 model=MODEL,
                 contents=contents,
@@ -758,7 +757,6 @@ def execute_function(
     name: str,
     args: Dict[str, Any],
 ):
-
     function = available_functions.get(name)
 
     if not function:
@@ -1029,6 +1027,7 @@ def run_agent(
             candidate = response.candidates[0]
 
             if candidate.content:
+
                 contents.append(
                     candidate.content
                 )
@@ -1064,11 +1063,6 @@ def run_agent(
                         response={
                             "error": "Unknown function."
                         },
-                        id=getattr(
-                            function_call,
-                            "id",
-                            None,
-                        ),
                     )
                 )
 
@@ -1105,17 +1099,18 @@ def run_agent(
                     f"[Tool] {tool_name} executed successfully."
                 )
 
+                # IMPORTANT:
+                # Do NOT pass id= here.
+                # Your installed SDK's
+                # Part.from_function_response()
+                # does not accept id as a keyword argument.
+
                 tool_responses.append(
                     types.Part.from_function_response(
                         name=tool_name,
                         response={
                             "result": result
                         },
-                        id=getattr(
-                            function_call,
-                            "id",
-                            None,
-                        ),
                     )
                 )
 
@@ -1126,6 +1121,9 @@ def run_agent(
                     f"{type(error).__name__}: {error}"
                 )
 
+                # IMPORTANT:
+                # Same fix here: no id= argument.
+
                 tool_responses.append(
                     types.Part.from_function_response(
                         name=tool_name,
@@ -1135,11 +1133,6 @@ def run_agent(
                                 "operation failed."
                             )
                         },
-                        id=getattr(
-                            function_call,
-                            "id",
-                            None,
-                        ),
                     )
                 )
 
@@ -1204,6 +1197,7 @@ def health():
 def chat(request: ChatRequest):
 
     message = request.message.strip()
+
     session_id = request.session_id.strip()
 
     if not message:
