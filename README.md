@@ -8,7 +8,7 @@ The agent connects an AI reasoning layer with approved Paras Arts business data 
 
 The project combines **Generative AI, Python, FastAPI, MongoDB, data analysis, and controlled tool execution** to create a practical AI agent for a real-world business application.
 
-> 🎨 Related Project: [Paras Arts Website](YOUR_PARAS_ARTS_REPOSITORY_URL)
+> 🎨 Related Project: [Paras Arts Website](https://github.com/paraskosambe-web/paras-arts.git)
 
 ---
 
