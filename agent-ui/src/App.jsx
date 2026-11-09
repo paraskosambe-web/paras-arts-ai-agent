@@ -38,6 +38,21 @@ const loadingMessages = [
   "Putting the answer together",
 ];
 
+const CHAT_STORAGE_KEY = "paras_arts_agent_chats";
+const ACTIVE_CHAT_KEY = "paras_arts_agent_active_chat";
+const MAX_SAVED_CHATS = 20;
+
+function loadSavedChats() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || "[]");
+    return Array.isArray(saved)
+      ? saved.filter((chat) => chat && typeof chat.id === "string" && Array.isArray(chat.messages)).slice(0, MAX_SAVED_CHATS)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function MongoMark({ className = "" }) {
   return (
     <svg className={className} viewBox="0 0 40 40" role="img" aria-label="MongoDB">
@@ -177,27 +192,52 @@ function FormattedAnswer({ content }) {
 
 function App() {
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [chats, setChats] = useState(loadSavedChats);
+  const [activeChatId, setActiveChatId] = useState(() => {
+    const savedChats = loadSavedChats();
+    const savedActiveId = localStorage.getItem(ACTIVE_CHAT_KEY);
+    return savedChats.some((chat) => chat.id === savedActiveId)
+      ? savedActiveId
+      : savedChats[0]?.id || crypto.randomUUID();
+  });
+  const [loadingChatId, setLoadingChatId] = useState(null);
   const [loadingPhase, setLoadingPhase] = useState(0);
   const chatEndRef = useRef(null);
-
-  const [sessionId] = useState(() => {
-    const existingSession = localStorage.getItem("paras_arts_agent_session");
-    if (existingSession) return existingSession;
-
-    const newSession = crypto.randomUUID();
-    localStorage.setItem("paras_arts_agent_session", newSession);
-    return newSession;
-  });
+  const messages = chats.find((chat) => chat.id === activeChatId)?.messages || [];
+  const loading = loadingChatId === activeChatId;
+  const requestInProgress = loadingChatId !== null;
 
   useEffect(() => {
-    if (!loading) return undefined;
+    try {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chats.slice(0, MAX_SAVED_CHATS)));
+    } catch {
+      const compactChats = chats.slice(0, 10).map((chat) => ({
+        ...chat,
+        messages: chat.messages.slice(-80),
+      }));
+      try {
+        localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(compactChats));
+      } catch {
+        // Keep the current conversation usable if browser storage is unavailable.
+      }
+    }
+  }, [chats]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_CHAT_KEY, activeChatId);
+    } catch {
+      // Active chat selection can still be used for this tab session.
+    }
+  }, [activeChatId]);
+
+  useEffect(() => {
+    if (!requestInProgress) return undefined;
     const timer = window.setInterval(() => {
       setLoadingPhase((current) => (current + 1) % loadingMessages.length);
     }, 1700);
     return () => window.clearInterval(timer);
-  }, [loading]);
+  }, [requestInProgress]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -205,21 +245,38 @@ function App() {
 
   const sendMessage = async (text = message) => {
     const userMessage = text.trim();
-    if (!userMessage || loading) return;
+    if (!userMessage || requestInProgress) return;
 
-    setMessages((previous) => [
-      ...previous,
-      { id: crypto.randomUUID(), role: "user", content: userMessage },
-    ]);
+    const requestChatId = activeChatId;
+    const appendMessage = (chatId, nextMessage) => {
+      setChats((previousChats) => {
+        const existingChat = previousChats.find((chat) => chat.id === chatId);
+        const nextMessages = [...(existingChat?.messages || []), nextMessage].slice(-200);
+        const firstUserMessage = nextMessages.find((item) => item.role === "user")?.content;
+        const title = firstUserMessage
+          ? `${firstUserMessage.slice(0, 42)}${firstUserMessage.length > 42 ? "…" : ""}`
+          : existingChat?.title || "New conversation";
+        const updatedChat = {
+          id: chatId,
+          title,
+          messages: nextMessages,
+          updatedAt: Date.now(),
+        };
+        return [updatedChat, ...previousChats.filter((chat) => chat.id !== chatId)]
+          .slice(0, MAX_SAVED_CHATS);
+      });
+    };
+
+    appendMessage(requestChatId, { id: crypto.randomUUID(), role: "user", content: userMessage });
     setMessage("");
     setLoadingPhase(0);
-    setLoading(true);
+    setLoadingChatId(requestChatId);
 
     try {
       const response = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage, session_id: sessionId }),
+        body: JSON.stringify({ message: userMessage, session_id: requestChatId }),
       });
       const data = await response.json();
 
@@ -227,27 +284,21 @@ function App() {
         throw new Error(data.detail || data.answer || "The agent could not complete that request.");
       }
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: data.answer || "I received your request but did not get a response.",
-          visualizations: data.visualizations || [],
-        },
-      ]);
+      appendMessage(requestChatId, {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: data.answer || "I received your request but did not get a response.",
+        visualizations: data.visualizations || [],
+      });
     } catch (error) {
-      setMessages((previous) => [
-        ...previous,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: error.message || "I could not connect to the data assistant right now.",
-          isError: true,
-        },
-      ]);
+      appendMessage(requestChatId, {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: error.message || "I could not connect to the data assistant right now.",
+        isError: true,
+      });
     } finally {
-      setLoading(false);
+      setLoadingChatId((current) => current === requestChatId ? null : current);
     }
   };
 
@@ -259,7 +310,17 @@ function App() {
   };
 
   const startNewChat = () => {
-    setMessages([]);
+    const newChatId = crypto.randomUUID();
+    setChats((previousChats) => [
+      { id: newChatId, title: "New conversation", messages: [], updatedAt: Date.now() },
+      ...previousChats.filter((chat) => chat.id !== newChatId),
+    ].slice(0, MAX_SAVED_CHATS));
+    setActiveChatId(newChatId);
+    setMessage("");
+  };
+
+  const openChat = (chatId) => {
+    setActiveChatId(chatId);
     setMessage("");
   };
 
@@ -289,11 +350,20 @@ function App() {
           </button>
 
           <div className="sidebar-label recent-label">RECENT</div>
-          {messages.length ? (
-            <button className="recent-item">
-              <span className="recent-indicator" />
-              <span className="recent-title">Current conversation</span>
-            </button>
+          {chats.length ? (
+            <div className="recent-list">
+              {chats.map((chat) => (
+                <button
+                  className={`recent-item ${chat.id === activeChatId ? "selected" : ""}`}
+                  key={chat.id}
+                  onClick={() => openChat(chat.id)}
+                  title={chat.title}
+                >
+                  <span className="recent-indicator" />
+                  <span className="recent-title">{chat.title}</span>
+                </button>
+              ))}
+            </div>
           ) : (
             <p className="sidebar-empty">Your conversations will appear here.</p>
           )}
@@ -385,12 +455,12 @@ function App() {
                 onKeyDown={handleKeyDown}
                 placeholder="Ask about orders, trends, payments, or your business..."
                 rows={1}
-                disabled={loading}
+                disabled={requestInProgress}
                 aria-label="Ask the Paras Arts data assistant"
               />
               <div className="composer-actions">
                 <span className="composer-context"><MongoMark /><span>Paras Arts database</span></span>
-                <button className="send-button" onClick={() => sendMessage()} disabled={!message.trim() || loading} aria-label="Send message">↑</button>
+                <button className="send-button" onClick={() => sendMessage()} disabled={!message.trim() || requestInProgress} aria-label="Send message">↑</button>
               </div>
             </div>
             <div className="composer-caption">

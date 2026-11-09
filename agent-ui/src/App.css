@@ -42,6 +42,7 @@ button { -webkit-tap-highlight-color: transparent; }
   top: 0;
   align-self: flex-start;
   flex: 0 0 auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -109,6 +110,9 @@ button { -webkit-tap-highlight-color: transparent; }
 .nav-chevron { margin-left: auto; color: #aaa39a; font-size: 19px; }
 .recent-label { margin-top: 28px; }
 .recent-item { padding: 8px 10px; cursor: pointer; }
+.recent-list { max-height: min(44vh, 430px); display: grid; gap: 2px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #dcd6cf transparent; }
+.recent-item:hover, .recent-item.selected { background: #ebe7e1; }
+.recent-item.selected .recent-indicator { background: var(--coral); }
 .recent-indicator { width: 6px; height: 6px; flex: 0 0 auto; background: #d4c4b4; border-radius: 50%; }
 .recent-title { overflow: hidden; color: #726c64; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-empty { margin: 0; padding: 2px 10px; color: #aaa39b; font-size: 10px; line-height: 1.55; }
@@ -276,7 +280,7 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 @media (max-height: 520px) and (min-width: 701px) {
-  .workspace-sidebar { overflow-y: auto; }
+  .recent-list { max-height: 32vh; }
   .chat-scroll.welcome-state { padding-top: 22px; }
 }
 
