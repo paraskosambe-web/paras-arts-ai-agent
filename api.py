@@ -739,6 +739,7 @@ Prefer:
 - Short headings
 - Bullet points
 - Small tables when useful
+- Put every Markdown table row on its own line; never compress a table into one line.
 - Clear numbers
 - Short explanations
 

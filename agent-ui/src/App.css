@@ -176,6 +176,15 @@ button { -webkit-tap-highlight-color: transparent; }
 .message-content li { margin: 3px 0; }
 .message-content strong { color: #302c28; font-weight: 680; }
 .message-content code { padding: 2px 5px; color: #8b503e; background: #f6efea; border-radius: 4px; font-size: .92em; }
+.message-content > * + * { margin-top: 12px; }
+.answer-table-wrap { width: fit-content; max-width: 100%; margin: 12px 0 14px; overflow-x: auto; border: 1px solid #e8e2da; border-radius: 9px; background: #fff; }
+.answer-table { width: 100%; min-width: 300px; border-collapse: separate; border-spacing: 0; color: #514a43; font-size: 10px; line-height: 1.45; }
+.answer-table th { padding: 9px 13px; color: #71665b; background: #f6f3ef; border-bottom: 1px solid #e8e2da; font-size: 9px; font-weight: 700; text-align: left; white-space: nowrap; }
+.answer-table td { padding: 8px 13px; border-bottom: 1px solid #f0ede8; }
+.answer-table tbody tr:last-child td { border-bottom: 0; }
+.answer-table tbody tr:nth-child(even) { background: #fcfbf9; }
+.answer-table tbody tr:hover { background: #faf4ef; }
+.answer-table th + th, .answer-table td + td { border-left: 1px solid #efebe5; }
 .message-row.user .message-content { max-width: min(550px, 82%); padding: 10px 14px; color: #433b35; background: #f1eeea; border: 1px solid #e9e4de; border-radius: 14px 14px 4px 14px; line-height: 1.6; }
 .error-message { color: #a34137; }
 

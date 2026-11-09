@@ -76,6 +76,105 @@ function LoadingIndicator({ phase }) {
   );
 }
 
+function splitPipeCells(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = splitPipeCells(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function compactTable(line) {
+  const firstPipe = line.indexOf("|");
+  const lastPipe = line.lastIndexOf("|");
+  if (firstPipe < 0 || lastPipe <= firstPipe) return null;
+
+  const tableText = line.slice(firstPipe, lastPipe + 1);
+  const cells = splitPipeCells(tableText).filter(Boolean);
+  const separatorIndex = cells.findIndex((cell) => /^:?-{3,}:?$/.test(cell));
+  if (separatorIndex < 2) return null;
+
+  const headers = cells.slice(0, separatorIndex);
+  const values = cells.slice(separatorIndex + 1).filter((cell) => !/^:?-{3,}:?$/.test(cell));
+  const rows = [];
+  for (let index = 0; index + headers.length <= values.length; index += headers.length) {
+    rows.push(values.slice(index, index + headers.length));
+  }
+
+  return {
+    prefix: line.slice(0, firstPipe).trim(),
+    suffix: line.slice(lastPipe + 1).trim(),
+    headers,
+    rows,
+  };
+}
+
+function FormattedAnswer({ content }) {
+  const lines = String(content || "").split(/\r?\n/);
+  const blocks = [];
+  let prose = [];
+  const flushProse = () => {
+    const value = prose.join("\n").trim();
+    if (value) blocks.push({ type: "prose", value });
+    prose = [];
+  };
+
+  for (let index = 0; index < lines.length;) {
+    if (index + 1 < lines.length && isTableSeparator(lines[index + 1]) && lines[index].includes("|")) {
+      flushProse();
+      const headers = splitPipeCells(lines[index]).filter(Boolean);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|")) {
+        if (!isTableSeparator(lines[index])) rows.push(splitPipeCells(lines[index]).filter(Boolean));
+        index += 1;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    const parsed = compactTable(lines[index]);
+    if (parsed) {
+      flushProse();
+      if (parsed.prefix) blocks.push({ type: "prose", value: parsed.prefix });
+      blocks.push({ type: "table", headers: parsed.headers, rows: parsed.rows });
+      if (parsed.suffix) prose.push(parsed.suffix);
+      index += 1;
+      continue;
+    }
+
+    prose.push(lines[index]);
+    index += 1;
+  }
+  flushProse();
+
+  return blocks.map((block, blockIndex) => {
+    if (block.type === "prose") {
+      return <ReactMarkdown key={`prose-${blockIndex}`}>{block.value}</ReactMarkdown>;
+    }
+    return (
+      <div className="answer-table-wrap" key={`table-${blockIndex}`}>
+        <table className="answer-table">
+          <thead><tr>{block.headers.map((header, index) => <th key={`${header}-${index}`}>{header}</th>)}</tr></thead>
+          <tbody>
+            {block.rows.map((row, rowIndex) => (
+              <tr key={`row-${rowIndex}`}>
+                {block.headers.map((_, cellIndex) => <td key={`cell-${cellIndex}`}>{row[cellIndex] || "—"}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  });
+}
+
 function App() {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
@@ -258,7 +357,7 @@ function App() {
                   <div className={`message-content ${item.isError ? "error-message" : ""}`}>
                     {item.role === "assistant" ? (
                       <>
-                        <ReactMarkdown>{item.content}</ReactMarkdown>
+                        <FormattedAnswer content={item.content} />
                         {item.visualizations?.length > 0 && (
                           <div className="charts-stack">
                             {item.visualizations.map((chart, index) => (
