@@ -733,6 +733,218 @@ def get_paras_business_summary():
     })
 
 
+def generate_paras_business_performance_report():
+    """Return a bounded, privacy-safe, all-time BI snapshot for a full business report."""
+    orders = db["orders"]
+    artworks = db["artworks"]
+    report_collections = ["orders", "artworks", "services", "messages", "testimonials", "newsletters"]
+    available_collections = set(db.list_collection_names(
+        filter={"name": {"$in": report_collections}}
+    ))
+
+    def collection_count(name):
+        return db[name].count_documents({}) if name in available_collections else None
+
+    def grouped_counts(collection, field, count_key="count"):
+        return list(collection.aggregate([
+            {"$group": {
+                "_id": {"$ifNull": [f"${field}", "Unknown"]},
+                count_key: {"$sum": 1},
+            }},
+            {"$sort": {count_key: -1}},
+            {"$limit": 30},
+        ]))
+
+    orders_available = "orders" in available_collections
+    artworks_available = "artworks" in available_collections
+    total_orders = collection_count("orders")
+    order_status = grouped_counts(orders, "status") if orders_available else None
+    payment_status = grouped_counts(orders, "paymentStatus") if orders_available else None
+    artwork_categories = grouped_counts(artworks, "category") if artworks_available else None
+
+    service_field = next((
+        field for field in ("serviceTitle", "serviceName", "service", "sketchType")
+        if orders.find_one({field: {"$type": "string"}}, {"_id": 0, field: 1})
+    ), None) if orders_available else None
+    order_types = grouped_counts(orders, service_field) if service_field else None
+    service_field_is_proxy = service_field == "sketchType"
+
+    order_category_field = next((
+        field for field in ("artworkCategory", "artwork_category")
+        if orders.find_one({field: {"$type": "string"}}, {"_id": 0, field: 1})
+    ), None) if orders_available else None
+    orders_by_artwork_category = (
+        grouped_counts(orders, order_category_field)
+        if order_category_field else None
+    )
+
+    message_count = collection_count("messages")
+    testimonial_count = collection_count("testimonials")
+    newsletter_count = collection_count("newsletters")
+    newsletter_status_field = next((
+        field for field in ("subscriptionStatus", "status")
+        if db["newsletters"].find_one({field: {"$type": "string"}}, {"_id": 0, field: 1})
+    ), None) if newsletter_count is not None else None
+    if newsletter_status_field is None:
+        newsletter_status_field = next((
+            field for field in ("isSubscribed", "subscribed")
+            if db["newsletters"].find_one({field: {"$type": "bool"}}, {"_id": 0, field: 1})
+        ), None) if newsletter_count is not None else None
+    newsletter_status = (
+        grouped_counts(db["newsletters"], newsletter_status_field)
+        if newsletter_status_field else None
+    )
+
+    completed_count = orders.count_documents({"status": "Completed"}) if orders_available else None
+    amount_field = next((
+        field for field in ("paidAmount", "amountPaid", "paymentAmount", "transactionAmount", "amount", "totalAmount")
+        if orders.find_one({field: {"$type": "number"}}, {"_id": 0, field: 1})
+    ), None) if orders_available else None
+    revenue = {
+        "status": "unavailable",
+        "value": None,
+        "currency": "INR",
+        "reason": "No reliable paid-amount field was found; requested budgets and service prices are not revenue.",
+    }
+    if not orders_available:
+        revenue["reason"] = "The orders collection is unavailable."
+    elif completed_count == 0:
+        revenue = {
+            "status": "available",
+            "value": 0,
+            "currency": "INR",
+            "basis": "There are no orders marked Completed.",
+        }
+    elif amount_field:
+        verified_completed = orders.count_documents({
+            "status": "Completed",
+            "paymentStatus": "Verified",
+            amount_field: {"$type": "number"},
+        })
+        if verified_completed == completed_count:
+            total_result = list(orders.aggregate([
+                {"$match": {
+                    "status": "Completed",
+                    "paymentStatus": "Verified",
+                    amount_field: {"$type": "number"},
+                }},
+                {"$group": {"_id": None, "total": {"$sum": f"${amount_field}"}}},
+            ]))
+            revenue = {
+                "status": "available",
+                "value": total_result[0]["total"] if total_result else 0,
+                "currency": "INR",
+                "basis": f"Sum of {amount_field} for completed orders with Verified payment status.",
+            }
+        else:
+            revenue["reason"] = (
+                "Completed orders do not all have a numeric paid amount and Verified payment status."
+            )
+
+    data_quality = {
+        "orders_missing_order_id": orders.count_documents({"$or": [{"orderId": {"$exists": False}}, {"orderId": None}, {"orderId": ""}]}),
+        "orders_missing_status": orders.count_documents({"$or": [{"status": {"$exists": False}}, {"status": None}, {"status": ""}]}),
+        "orders_missing_payment_status": orders.count_documents({"$or": [{"paymentStatus": {"$exists": False}}, {"paymentStatus": None}, {"paymentStatus": ""}]}),
+        "completed_orders_without_verified_payment": orders.count_documents({"status": "Completed", "paymentStatus": {"$ne": "Verified"}}),
+        "verified_payments_without_completed_order": orders.count_documents({"paymentStatus": "Verified", "status": {"$ne": "Completed"}}),
+        "pending_orders_older_than_7_days": orders.count_documents({
+            "status": "Pending",
+            "createdAt": {"$type": "date", "$lte": datetime.now(timezone.utc) - timedelta(days=7)},
+        }),
+        "in_progress_orders_older_than_14_days": orders.count_documents({
+            "status": "In Progress",
+            "createdAt": {"$type": "date", "$lte": datetime.now(timezone.utc) - timedelta(days=14)},
+        }),
+    } if orders_available else None
+
+    budget_stats = analyze_paras_budgets() if orders_available else None
+    if budget_stats is not None:
+        budget_stats.pop("visualization", None)
+    order_trends = analyze_paras_order_trends("month", 12) if orders_available else None
+
+    engagement_rows = [
+        {"_id": label, "count": value}
+        for label, value in (("Messages", message_count), ("Testimonials", testimonial_count), ("Newsletter Records", newsletter_count))
+        if value is not None
+    ]
+
+    visualizations = [
+        build_chart("Orders by Status", order_status or [], "count", "donut"),
+        build_chart("Payments by Status", payment_status or [], "count", "donut"),
+        build_chart("Artworks by Category", artwork_categories or [], "count", "donut"),
+        build_chart(
+            "Most Requested Order Types" if service_field_is_proxy else "Most Requested Services",
+            order_types or [],
+            "count",
+        ),
+        build_chart("Customer Touchpoints", engagement_rows, "count"),
+        order_trends["visualization"] if order_trends else build_chart("Monthly Orders", [], "count", "line"),
+    ]
+
+    return serialize_value({
+        "report_scope": "All-time counts and distributions unless a metric says otherwise. The report uses business collections only and excludes admin/security data.",
+        "orders": {
+            "total": total_orders,
+            "by_status": order_status,
+            "by_payment_status": payment_status,
+            "monthly_trend_last_12_periods": order_trends["trend"] if order_trends else None,
+        },
+        "revenue": revenue,
+        "requested_order_budgets": budget_stats,
+        "artworks": {
+            "total": collection_count("artworks"),
+            "by_catalog_category": artwork_categories,
+            "orders_by_artwork_category": orders_by_artwork_category,
+            "order_category_note": (
+                "Orders collection unavailable; order category distribution cannot be checked."
+                if not orders_available else (
+                    "No artwork category field was found on order records; catalog category counts are not order counts."
+                    if orders_by_artwork_category is None else None
+                )
+            ),
+        },
+        "service_demand": {
+            "service_catalog_count": collection_count("services"),
+            "most_requested": order_types,
+            "source_field": service_field,
+            "note": (
+                "Orders collection unavailable; service demand cannot be checked."
+                if not orders_available else (
+                    "Orders have no explicit service field; sketchType is shown as a demand proxy."
+                    if service_field_is_proxy else (
+                    "No service or order type field was found on order records."
+                    if service_field is None else None
+                    )
+                )
+            ),
+        },
+        "customer_engagement": {
+            "message_records": message_count,
+            "testimonial_records": testimonial_count,
+            "engagement_rate": None,
+            "note": (
+                "Counts show recorded touchpoints only; no delivery, response, or conversion denominator is available."
+                if message_count is not None and testimonial_count is not None else
+                "One or more engagement collections are unavailable; rates cannot be calculated."
+            ),
+        },
+        "newsletter": {
+            "records": newsletter_count,
+            "subscription_status_field": newsletter_status_field,
+            "by_status": newsletter_status,
+            "note": (
+                "Newsletter collection is unavailable."
+                if newsletter_count is None else (
+                    None if newsletter_status is not None else
+                    "Subscription records are counted; no subscription-status field was found."
+                )
+            ),
+        },
+        "data_quality_and_bottlenecks": data_quality,
+        "visualizations": visualizations,
+    })
+
+
 # ============================================================
 # LEVEL 3 — WRITE TOOLS
 # ============================================================

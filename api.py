@@ -28,6 +28,7 @@ from paras_tools import (
     search_paras_faqs,
     analyze_paras_faqs,
     get_paras_business_summary,
+    generate_paras_business_performance_report,
     update_paras_order_status,
     update_paras_payment_status,
     update_paras_artwork_featured,
@@ -173,6 +174,7 @@ available_functions = {
     "analyze_paras_faqs": analyze_paras_faqs,
 
     "get_paras_business_summary": get_paras_business_summary,
+    "generate_paras_business_performance_report": generate_paras_business_performance_report,
 
     # --------------------------------------------------------
     # CONTROLLED WRITES
@@ -443,6 +445,19 @@ function_declarations = [
         },
     ),
 
+    types.FunctionDeclaration(
+        name="generate_paras_business_performance_report",
+        description=(
+            "Generate one comprehensive, privacy-safe report snapshot for Paras Arts: "
+            "all-time order and payment status, verified revenue only when reliable paid-amount "
+            "data exists, artwork catalog categories, service-demand fields, customer touchpoint "
+            "counts, newsletter status when available, data-quality and bottleneck counts, and "
+            "chart payloads. Use this single tool for whole-business or comprehensive performance "
+            "report requests. It returns no customer contact details."
+        ),
+        parameters={"type": "object", "properties": {}},
+    ),
+
     # ========================================================
     # CONTROLLED WRITE OPERATIONS
     # ========================================================
@@ -655,6 +670,7 @@ You can:
 - Search FAQs
 - Analyze FAQs
 - Get a business summary
+- Generate a comprehensive business performance report
 
 Always use the appropriate tool when the user asks about
 actual Paras Arts database information.
@@ -751,6 +767,12 @@ When reporting database results, distinguish between:
 - Calculations based on database data
 - General explanations
 
+For requests for a comprehensive business report, use
+generate_paras_business_performance_report once. Build the response from its returned
+metrics, explain every unavailable metric, and give exactly five actionable
+recommendations tied to observed counts or clearly stated data limitations.
+Do not infer revenue from budgets, catalog prices, or order counts.
+
 Never claim that a database modification happened until the
 backend confirms that it was successfully executed.
 """
@@ -806,7 +828,7 @@ def generate_with_retry(contents):
                 tools=OPENROUTER_TOOLS,
                 tool_choice="auto",
                 temperature=0.2,
-                max_tokens=800,
+                max_tokens=2600,
             )
 
         except Exception as error:
@@ -868,7 +890,7 @@ def collect_visualizations(result):
         return []
 
     safe = []
-    for chart in candidates[:4]:
+    for chart in candidates[:6]:
         if not isinstance(chart, dict) or chart.get("type") not in {"bar", "line", "donut"}:
             continue
         rows = chart.get("data", [])
