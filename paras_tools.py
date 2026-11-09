@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
@@ -31,7 +31,7 @@ client = MongoClient(
 )
 
 # REAL PARAS ARTS DATABASE
-db = client["test"]
+db = client[os.getenv("MONGO_DB_NAME", "test")]
 
 
 # ============================================================
@@ -89,6 +89,20 @@ def safe_regex_pattern(value: str):
     """
 
     return re.escape(value.strip())
+
+
+def build_chart(title: str, records: list[dict], value_key: str, chart_type="bar", currency=None):
+    """Build a compact chart payload from grouped MongoDB results."""
+    return {
+        "type": chart_type,
+        "title": title,
+        "value_label": value_key.replace("_", " ").title(),
+        "currency": currency,
+        "data": [
+            {"label": str(row.get("_id") or "Unknown"), "value": row.get(value_key, 0) or 0}
+            for row in records
+        ],
+    }
 
 
 # ============================================================
@@ -166,6 +180,7 @@ def analyze_paras_orders():
     return serialize_value({
         "total_orders": db["orders"].count_documents({}),
         "by_status": results,
+        "visualization": build_chart("Orders by Status", results, "order_count", "donut"),
     })
 
 
@@ -195,6 +210,7 @@ def analyze_paras_payments():
     return serialize_value({
         "total_orders": db["orders"].count_documents({}),
         "by_payment_status": results,
+        "visualization": build_chart("Payment Status", results, "order_count", "donut"),
     })
 
 
@@ -217,10 +233,100 @@ def analyze_paras_sketch_types():
         },
     ]
 
+    results = list(db["orders"].aggregate(pipeline))
     return serialize_value({
-        "by_sketch_type": list(
-            db["orders"].aggregate(pipeline)
-        )
+        "by_sketch_type": results,
+        "visualization": build_chart("Orders by Sketch Type", results, "order_count"),
+    })
+
+
+def analyze_paras_order_trends(period: str = "month", periods: int = 8):
+    """Aggregate orders with valid createdAt dates into a bounded timeline."""
+    period = (period or "month").lower()
+    if period not in {"day", "week", "month"}:
+        period = "month"
+    try:
+        periods = max(2, min(int(periods), 24))
+    except (TypeError, ValueError):
+        periods = 8
+
+    now = datetime.now(timezone.utc)
+    if period == "month":
+        month_index = now.year * 12 + now.month - 1 - (periods - 1)
+        year, month_zero_based = divmod(month_index, 12)
+        start = datetime(year, month_zero_based + 1, 1, tzinfo=timezone.utc)
+    elif period == "week":
+        current_week = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        current_week -= timedelta(days=current_week.weekday())
+        start = current_week - timedelta(weeks=periods - 1)
+    else:
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = today - timedelta(days=periods - 1)
+    date_format = {"day": "%Y-%m-%d", "week": "%G-W%V", "month": "%Y-%m"}[period]
+    period_name = {"day": "Daily", "week": "Weekly", "month": "Monthly"}[period]
+    results = list(db["orders"].aggregate([
+        {"$match": {"createdAt": {"$gte": start, "$type": "date"}}},
+        {"$group": {
+            "_id": {"$dateToString": {"format": date_format, "date": "$createdAt", "timezone": "UTC"}},
+            "order_count": {"$sum": 1},
+        }},
+        {"$sort": {"_id": 1}},
+    ]))
+    return serialize_value({
+        "period": period,
+        "periods_requested": periods,
+        "orders_in_window": sum(row["order_count"] for row in results),
+        "trend": results,
+        "visualization": {
+            **build_chart(f"Orders Over Time ({period_name})", results, "order_count", "line"),
+            "value_label": "Orders",
+        },
+        "note": "Only records with a MongoDB date in createdAt are included.",
+    })
+
+
+def analyze_paras_order_segments(dimension: str = "sketchType", metric: str = "count"):
+    """Compare orders across approved fields using count or average requested budget."""
+    dimensions = {
+        "status": "$status",
+        "paymentStatus": "$paymentStatus",
+        "sketchType": "$sketchType",
+    }
+    if dimension not in dimensions:
+        dimension = "sketchType"
+    if metric not in {"count", "average_budget"}:
+        metric = "count"
+
+    group = {"_id": dimensions[dimension]}
+    if metric == "count":
+        group["value"] = {"$sum": 1}
+    else:
+        group["value"] = {
+            "$avg": {
+                "$cond": [
+                    {"$isNumber": "$budget"},
+                    "$budget",
+                    None,
+                ]
+            }
+        }
+
+    results = list(db["orders"].aggregate([
+        {"$group": group},
+        {"$sort": {"value": -1}},
+    ]))
+    metric_label = "Average Requested Budget" if metric == "average_budget" else "Orders"
+    return serialize_value({
+        "dimension": dimension,
+        "metric": metric,
+        "groups": results,
+        "visualization": build_chart(
+            f"{metric_label} by {dimension}",
+            results,
+            "value",
+            currency="INR" if metric == "average_budget" else None,
+        ),
+        "note": "Average requested budget is not revenue." if metric == "average_budget" else None,
     })
 
 
@@ -266,19 +372,30 @@ def analyze_paras_budgets():
     )
 
     if not results:
-        return {
+        result = {
             "order_count": 0,
             "average_budget": 0,
             "minimum_budget": 0,
             "maximum_budget": 0,
             "total_requested_budget": 0,
         }
+    else:
+        result = results[0]
+        result.pop("_id", None)
 
-    result = results[0]
-
-    result.pop("_id", None)
-
-    return serialize_value(result)
+    result = serialize_value(result)
+    result["visualization"] = {
+        "type": "bar",
+        "title": "Requested Budget Summary",
+        "value_label": "Amount",
+        "currency": "INR",
+        "data": [
+            {"label": "Average", "value": result["average_budget"]},
+            {"label": "Minimum", "value": result["minimum_budget"]},
+            {"label": "Maximum", "value": result["maximum_budget"]},
+        ],
+    }
+    return result
 
 
 # ============================================================
@@ -350,6 +467,7 @@ def analyze_paras_artworks():
         },
     ]
 
+    categories = list(db["artworks"].aggregate(pipeline))
     return serialize_value({
         "total_artworks": db["artworks"].count_documents({}),
 
@@ -359,9 +477,8 @@ def analyze_paras_artworks():
             }
         ),
 
-        "by_category": list(
-            db["artworks"].aggregate(pipeline)
-        ),
+        "by_category": categories,
+        "visualization": build_chart("Artworks by Category", categories, "artwork_count", "donut"),
     })
 
 
@@ -432,9 +549,15 @@ def analyze_paras_services():
         )
     )
 
+    prices = [
+        {"_id": item.get("title", "Service"), "price": item.get("priceFrom", 0)}
+        for item in documents
+        if isinstance(item.get("priceFrom"), (int, float))
+    ]
     return serialize_value({
         "total_services": len(documents),
         "services": documents,
+        "visualization": build_chart("Starting Price by Service", prices, "price", currency="INR"),
     })
 
 
@@ -523,11 +646,11 @@ def analyze_paras_faqs():
         },
     ]
 
+    categories = list(db["faqs"].aggregate(pipeline))
     return serialize_value({
         "total_faqs": db["faqs"].count_documents({}),
-        "by_category": list(
-            db["faqs"].aggregate(pipeline)
-        ),
+        "by_category": categories,
+        "visualization": build_chart("FAQs by Category", categories, "faq_count", "donut"),
     })
 
 
@@ -603,6 +726,10 @@ def get_paras_business_summary():
         "orders_by_status": order_status,
 
         "orders_by_payment_status": payment_status,
+        "visualizations": [
+            build_chart("Orders by Status", order_status, "count", "donut"),
+            build_chart("Payments by Status", payment_status, "count", "donut"),
+        ],
     })
 
 

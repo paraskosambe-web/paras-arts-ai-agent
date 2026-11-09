@@ -1,4 +1,6 @@
 import os
+import json
+import math
 import time
 import random
 from typing import Dict, Any
@@ -8,12 +10,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from google import genai
+from openai import OpenAI
 from google.genai import types
 
 from paras_tools import (
     search_paras_orders,
     analyze_paras_orders,
+    analyze_paras_order_trends,
+    analyze_paras_order_segments,
     analyze_paras_payments,
     analyze_paras_sketch_types,
     analyze_paras_budgets,
@@ -38,27 +42,27 @@ from paras_tools import (
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-if not GEMINI_API_KEY:
+if not OPENROUTER_API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY is missing from environment variables."
+        "OPENROUTER_API_KEY is missing from environment variables."
     )
 
 
 # ============================================================
-# GEMINI CLIENT
+# OPENROUTER CLIENT
 # ============================================================
 
-client = genai.Client(
-    api_key=GEMINI_API_KEY
+client = OpenAI(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
 )
 
-# Keep this configurable through Render environment variables.
-# If GEMINI_MODEL is not set, this is the default.
+# Keep this configurable through deployment environment variables.
 MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.8-flash"
+    "OPENROUTER_MODEL",
+    "openrouter/free"
 )
 
 
@@ -72,7 +76,7 @@ app = FastAPI(
         "AI-powered business data analyst and "
         "data management agent for Paras Arts."
     ),
-    version="2.1.0",
+    version="2.2.0",
 )
 
 
@@ -153,6 +157,8 @@ available_functions = {
 
     "search_paras_orders": search_paras_orders,
     "analyze_paras_orders": analyze_paras_orders,
+    "analyze_paras_order_trends": analyze_paras_order_trends,
+    "analyze_paras_order_segments": analyze_paras_order_segments,
     "analyze_paras_payments": analyze_paras_payments,
     "analyze_paras_sketch_types": analyze_paras_sketch_types,
     "analyze_paras_budgets": analyze_paras_budgets,
@@ -181,7 +187,7 @@ available_functions = {
 
 
 # ============================================================
-# GEMINI FUNCTION DECLARATIONS
+# FUNCTION DECLARATIONS
 # ============================================================
 
 function_declarations = [
@@ -221,6 +227,51 @@ function_declarations = [
         parameters={
             "type": "object",
             "properties": {},
+        },
+    ),
+
+    types.FunctionDeclaration(
+        name="analyze_paras_order_trends",
+        description=(
+            "Analyze order volume over time for a daily, weekly, or monthly period. "
+            "Use for trend questions and requests to chart orders over time. "
+            "Only dated orders inside the selected window are counted."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "enum": ["day", "week", "month"],
+                    "description": "Time bucket for the trend.",
+                },
+                "periods": {
+                    "type": "integer",
+                    "description": "Number of buckets to include, from 2 to 24.",
+                },
+            },
+        },
+    ),
+
+    types.FunctionDeclaration(
+        name="analyze_paras_order_segments",
+        description=(
+            "Compare order counts or average requested budget across the safe dimensions "
+            "status, paymentStatus, or sketchType. Use for questions like which sketch "
+            "type has the highest average requested budget. Requested budget is not revenue."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": ["status", "paymentStatus", "sketchType"],
+                },
+                "metric": {
+                    "type": "string",
+                    "enum": ["count", "average_budget"],
+                },
+            },
         },
     ),
 
@@ -540,12 +591,36 @@ function_declarations = [
 
 
 # ============================================================
-# GEMINI TOOL CONFIG
+# OPENROUTER TOOL SCHEMAS
 # ============================================================
 
-paras_tool = types.Tool(
-    function_declarations=function_declarations
-)
+def openrouter_function_schema(declaration):
+    schema = declaration.model_dump(mode="json", exclude_none=True)
+
+    def normalize_types(value):
+        if isinstance(value, dict):
+            return {
+                key: (
+                    item.lower()
+                    if key == "type" and isinstance(item, str)
+                    else normalize_types(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [normalize_types(item) for item in value]
+        return value
+
+    return normalize_types(schema)
+
+
+OPENROUTER_TOOLS = [
+    {
+        "type": "function",
+        "function": openrouter_function_schema(declaration),
+    }
+    for declaration in function_declarations
+]
 
 
 # ============================================================
@@ -568,6 +643,8 @@ You can:
 
 - Search orders
 - Analyze order statistics
+- Analyze order volume trends over time
+- Compare order segments by status, payment status, or sketch type
 - Analyze payment statistics
 - Analyze sketch types
 - Analyze requested budgets
@@ -640,6 +717,17 @@ Payment status is NOT order status.
 If there is not enough database information to answer a question,
 say so clearly.
 
+Never call requested order budgets revenue or sales. Only report actual
+revenue if the database contains a verified payment amount field.
+
+For trend or chart requests, use the relevant analysis tool and explain
+notable changes only when supported by its returned values.
+
+For decision questions, give a practical recommendation backed by database
+facts, show the calculation or comparison used, and state when the available
+data is too limited to justify a confident conclusion. Do not claim that one
+business measure caused another without evidence.
+
 ============================================================
 RESPONSE STYLE
 ============================================================
@@ -671,7 +759,7 @@ backend confirms that it was successfully executed.
 # RETRY CONFIGURATION
 # ============================================================
 
-MAX_GEMINI_RETRIES = 3
+MAX_OPENROUTER_RETRIES = 3
 
 RETRYABLE_ERROR_TEXT = (
     "503",
@@ -681,13 +769,16 @@ RETRYABLE_ERROR_TEXT = (
     "overloaded",
     "429",
     "resource exhausted",
+    "rate limit",
+    "timeout",
+    "timed out",
 )
 
 
-def is_retryable_gemini_error(error: Exception) -> bool:
+def is_retryable_openrouter_error(error: Exception) -> bool:
     """
     Determine whether an exception appears to be a temporary
-    Gemini availability or rate-limit problem.
+    OpenRouter availability or rate-limit problem.
     """
 
     error_text = str(error).lower()
@@ -699,39 +790,32 @@ def is_retryable_gemini_error(error: Exception) -> bool:
 
 
 # ============================================================
-# GEMINI CALL WITH RETRY / BACKOFF
+# OPENROUTER CALL WITH RETRY / BACKOFF
 # ============================================================
 
 def generate_with_retry(contents):
     last_error = None
 
-    for attempt in range(MAX_GEMINI_RETRIES + 1):
+    for attempt in range(MAX_OPENROUTER_RETRIES + 1):
 
         try:
-            return client.models.generate_content(
+            return client.chat.completions.create(
                 model=MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    tools=[paras_tool],
-                    automatic_function_calling=(
-                        types.AutomaticFunctionCallingConfig(
-                            disable=True
-                        )
-                    ),
-                    temperature=0.2,
-                    max_output_tokens=800,
-                ),
+                messages=contents,
+                tools=OPENROUTER_TOOLS,
+                tool_choice="auto",
+                temperature=0.2,
+                max_tokens=800,
             )
 
         except Exception as error:
 
             last_error = error
 
-            if not is_retryable_gemini_error(error):
+            if not is_retryable_openrouter_error(error):
                 raise
 
-            if attempt >= MAX_GEMINI_RETRIES:
+            if attempt >= MAX_OPENROUTER_RETRIES:
                 raise
 
             delay = (
@@ -740,7 +824,7 @@ def generate_with_retry(contents):
             )
 
             print(
-                f"[Gemini] Temporary error. "
+                f"[OpenRouter] Temporary error. "
                 f"Retrying in {delay:.2f}s..."
             )
 
@@ -765,6 +849,44 @@ def execute_function(
         )
 
     return function(**args)
+
+
+def wants_visualization(message: str) -> bool:
+    keywords = ("chart", "graph", "plot", "visualiz", "diagram", "pie chart", "donut")
+    normalized = message.lower()
+    return any(keyword in normalized for keyword in keywords)
+
+
+def collect_visualizations(result):
+    if not isinstance(result, dict):
+        return []
+    candidates = result.get("visualizations", [])
+    if not candidates and result.get("visualization"):
+        candidates = [result["visualization"]]
+    if not isinstance(candidates, list):
+        return []
+
+    safe = []
+    for chart in candidates[:4]:
+        if not isinstance(chart, dict) or chart.get("type") not in {"bar", "line", "donut"}:
+            continue
+        rows = chart.get("data", [])
+        if not isinstance(rows, list):
+            continue
+        safe.append({
+            "type": chart["type"],
+            "title": str(chart.get("title", "Data insight"))[:90],
+            "value_label": str(chart.get("value_label", "Value"))[:40],
+            "currency": chart.get("currency") if chart.get("currency") == "INR" else None,
+            "data": [
+                {"label": str(row.get("label", ""))[:60], "value": row.get("value", 0)}
+                for row in rows[:30]
+                if isinstance(row, dict)
+                and isinstance(row.get("value", 0), (int, float))
+                and math.isfinite(float(row.get("value", 0)))
+            ],
+        })
+    return safe
 
 
 # ============================================================
@@ -959,15 +1081,11 @@ def run_agent(
     # --------------------------------------------------------
 
     contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part(
-                    text=message
-                )
-            ],
-        )
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": message},
     ]
+    include_visualizations = wants_visualization(message)
+    visualizations = []
 
     # --------------------------------------------------------
     # TOOL LOOP
@@ -986,14 +1104,14 @@ def run_agent(
         except Exception as error:
 
             print(
-                f"[Gemini] Request failed: "
+                f"[OpenRouter] Request failed: "
                 f"{type(error).__name__}: {error}"
             )
 
-            if is_retryable_gemini_error(error):
+            if is_retryable_openrouter_error(error):
 
                 return (
-                    "Gemini is temporarily unavailable right now. "
+                    "OpenRouter is temporarily unavailable right now. "
                     "Please try again in a few seconds."
                 )
 
@@ -1006,12 +1124,18 @@ def run_agent(
         # NO FUNCTION CALL
         # ----------------------------------------------------
 
-        if not response.function_calls:
+        assistant_message = response.choices[0].message
+        function_calls = assistant_message.tool_calls or []
 
-            text = response.text
+        if not function_calls:
+
+            text = assistant_message.content
 
             if text:
-                return text.strip()
+                return {
+                    "answer": text.strip(),
+                    "visualizations": visualizations,
+                }
 
             return (
                 "I couldn't generate a response "
@@ -1019,32 +1143,20 @@ def run_agent(
             )
 
         # ----------------------------------------------------
-        # APPEND MODEL RESPONSE
-        # ----------------------------------------------------
-
-        if response.candidates:
-
-            candidate = response.candidates[0]
-
-            if candidate.content:
-
-                contents.append(
-                    candidate.content
-                )
+        contents.append(assistant_message.model_dump(exclude_none=True))
 
         # ----------------------------------------------------
         # PROCESS FUNCTION CALLS
         # ----------------------------------------------------
 
-        tool_responses = []
+        for function_call in function_calls:
 
-        for function_call in response.function_calls:
+            tool_name = function_call.function.name
 
-            tool_name = function_call.name
-
-            args = dict(
-                function_call.args or {}
-            )
+            try:
+                args = json.loads(function_call.function.arguments or "{}")
+            except (TypeError, json.JSONDecodeError):
+                args = {}
 
             print(
                 f"[Agent] Function requested: "
@@ -1057,14 +1169,11 @@ def run_agent(
 
             if tool_name not in available_functions:
 
-                tool_responses.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={
-                            "error": "Unknown function."
-                        },
-                    )
-                )
+                contents.append({
+                    "role": "tool",
+                    "tool_call_id": function_call.id,
+                    "content": json.dumps({"error": "Unknown function."}),
+                })
 
                 continue
 
@@ -1095,24 +1204,18 @@ def run_agent(
                     args,
                 )
 
+                if include_visualizations:
+                    visualizations.extend(collect_visualizations(result))
+
                 print(
                     f"[Tool] {tool_name} executed successfully."
                 )
 
-                # IMPORTANT:
-                # Do NOT pass id= here.
-                # Your installed SDK's
-                # Part.from_function_response()
-                # does not accept id as a keyword argument.
-
-                tool_responses.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={
-                            "result": result
-                        },
-                    )
-                )
+                contents.append({
+                    "role": "tool",
+                    "tool_call_id": function_call.id,
+                    "content": json.dumps({"result": result}, default=str),
+                })
 
             except Exception as error:
 
@@ -1121,33 +1224,13 @@ def run_agent(
                     f"{type(error).__name__}: {error}"
                 )
 
-                # IMPORTANT:
-                # Same fix here: no id= argument.
-
-                tool_responses.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={
-                            "error": (
-                                "The requested database "
-                                "operation failed."
-                            )
-                        },
-                    )
-                )
-
-        # ----------------------------------------------------
-        # SEND TOOL RESULTS BACK TO GEMINI
-        # ----------------------------------------------------
-
-        if tool_responses:
-
-            contents.append(
-                types.Content(
-                    role="user",
-                    parts=tool_responses,
-                )
-            )
+                contents.append({
+                    "role": "tool",
+                    "tool_call_id": function_call.id,
+                    "content": json.dumps({
+                        "error": "The requested database operation failed."
+                    }),
+                })
 
     # --------------------------------------------------------
     # MAX ITERATIONS
@@ -1171,7 +1254,7 @@ def root():
         "service": "Paras Arts AI Agent",
         "mode": "business-data-management",
         "model": MODEL,
-        "version": "2.1.0",
+        "version": "2.2.0",
     }
 
 
@@ -1214,14 +1297,14 @@ def chat(request: ChatRequest):
 
     try:
 
-        answer = run_agent(
+        result = run_agent(
             message=message,
             session_id=session_id,
         )
 
-        return {
-            "answer": answer
-        }
+        if isinstance(result, dict):
+            return result
+        return {"answer": result, "visualizations": []}
 
     except Exception as error:
 
